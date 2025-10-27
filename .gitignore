@@ -187,3 +187,5 @@ cython_debug/
 warcamp_db/chroma.sqlite3
 warcamp_db/chroma.sqlite3
 /warcamp_db
+/warcamp_db
+/warcamp_db/chroma.sqlite3
