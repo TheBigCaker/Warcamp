@@ -180,3 +180,10 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 /.vs
+/warcamp_db/chroma.sqlite3
+/warcamp_db/chroma.sqlite3
+/output_project/dev_orch
+*.sqlite3
+warcamp_db/chroma.sqlite3
+warcamp_db/chroma.sqlite3
+/warcamp_db

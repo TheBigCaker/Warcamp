@@ -1,2 +1,4 @@
 ollama
 chromadb
+pydantic
+outlines
