@@ -1,0 +1,668 @@
+# - Implements README/PLAN/Template workflow
+# - Integrates 'outlines' for Advisor (Planner)
+# - Integrates 'guidance' for Sarge (Templater) & Orch (Builder)
+# - Updates model roster for 8GB VRAM (gemma3:4b, gemma3:1b, codegemma:7b-q3, codegemma:2b-q3)
+# - Updates thematic display names (Advisor, Council, Sarge, Orch)
+# - Replaces ChromaDB task queue with file-based TASKLIST.md
+# - Corrects guidance import and initialization (Using guidance.models.OpenAI for Ollama)
+# - Strengthens Advisor prompt (redundant but kept)
+# - Uses Pydantic Literal type for FileStructure.type to enforce validation
+# - NOTE: This is a sequential implementation. Async/Chat-Buffer is v1.3.0.
+
+import ollama
+import chromadb
+import time
+import json
+import os
+import re
+import sys
+import subprocess
+import outlines.models as outlines_models
+import outlines.generate as outlines_generate
+import guidance
+# Corrected import for guidance OpenAI model class (to connect to Ollama endpoint)
+from guidance.models import OpenAI as GuidanceOpenAI
+from pydantic import BaseModel, Field, field_validator, ValidationError
+# Import Literal for stronger type enforcement
+from typing import List, Optional, Literal
+
+# --- CONFIGURATION (v1.2.0) ---
+ADVISOR_MODEL = 'gemma3:4b-it-qat' # The "Planner" - using a smaller model for broader compatibility
+COUNCIL_MODEL = 'gemma3:1b-it-qat' # The "Chat Buffer" (Not yet async, used for system msgs)
+SARGE_MODEL = 'codegemma:7b-instruct-q3_K_S' # The "Templater / Debugger"
+ORCH_MODEL = 'codegemma:2b-code-q3_K_L' # The "Code Builder"
+
+# Ollama's OpenAI-compatible endpoint
+OLLAMA_OPENAI_ENDPOINT = "http://localhost:11434/v1"
+
+MAX_RETRIES = 3 # Number of times to retry a failed task
+TASKLIST_FILENAME = "TASKLIST.md" # Define filename for the task list
+
+# --- THEMATIC DISPLAY HELPER ---
+def print_msg(role, message):
+    """Prints a message with the thematic role name."""
+    print(f"\n{role}: '{message}'")
+
+# --- CONTEXT FILE LOADER (v1.2.0) ---
+CONTEXT_FILE_EXTENSIONS = [
+    '.py', '.js', '.html', '.css', '.md', '.txt', '.json',
+    '.ts', '.jsx', '.tsx', '.c', '.cpp', '.h', '.java', '.go',
+    '.rb', '.php', '.yml', '.yaml', '.sh', '.bat', '.ps1',
+    '.dockerfile', 'Dockerfile', '.gitignore'
+]
+
+def load_context_from_directory(directory_path, council_db, db_dir_name):
+    """Loads text files from a directory into the CouncilDB (Chroma)."""
+    print_msg("Sarge", f"Loading context scrolls from {directory_path}...")
+    context_count = 0
+    if not os.path.isdir(directory_path):
+        print_msg("Sarge", f"Notice: Path {directory_path} is not valid. Skipping.")
+        return
+
+    excluded_dirs = {'.git', 'venv', 'node_modules', '__pycache__', '.vscode', db_dir_name}
+    excluded_files = {'.gitattributes', '.gitmodules'}
+
+    for root, dirs, files in os.walk(directory_path):
+        # Filter excluded directories in-place
+        dirs[:] = [d for d in dirs if d not in excluded_dirs and not d.startswith('.')]
+        for file in files:
+            # Skip hidden files, lock files, logs, etc.
+            if file.startswith('.') or file in excluded_files or file.endswith(('.lock', '.env', '.log', '.tmp', '.bak', '.swp')):
+                continue
+            # Check if file has a valid extension or known filename
+            is_valid_extension = any(file.endswith(ext) for ext in CONTEXT_FILE_EXTENSIONS)
+            is_known_filename = file in ['Dockerfile']
+            if is_valid_extension or is_known_filename:
+                filepath = os.path.join(root, file)
+                try:
+                    # Read file content, ignore decoding errors
+                    with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()
+                        # Store only if content is meaningful (non-empty, > 10 chars)
+                        if content and content.strip() and len(content.strip()) > 10:
+                            council_db.store_context_scroll(filepath, content)
+                            context_count += 1
+                except Exception as e:
+                    print_msg("Sarge", f"Error reading scroll {filepath}: {type(e).__name__} - {e}")
+    print_msg("Sarge", f"Loaded {context_count} context scrolls from {directory_path} into Council memory.")
+
+# --- The "Council's Memory" (v1.2.0) ---
+class CouncilDB:
+    """Manages context scrolls and After-Action Reports (AARs) using ChromaDB."""
+    def __init__(self, db_path):
+        print("Initializing Council memory banks (ChromaDB)...")
+        os.makedirs(db_path, exist_ok=True) # Ensure DB directory exists
+        try:
+            # Initialize ChromaDB persistent client
+            self.client = chromadb.PersistentClient(path=db_path)
+            self.client.heartbeat() # Check connection
+            # Get or create collections for context and reports
+            self.context_scrolls = self.client.get_or_create_collection(name="warcamp_context_scrolls")
+            self.task_reports = self.client.get_or_create_collection(name="warcamp_task_reports")
+        except Exception as e:
+            print(f"FATAL: Could not initialize ChromaDB collections at {db_path}. Error: {e}")
+            raise # Reraise exception to stop execution if DB fails
+        print("...Council memory banks operational.")
+
+    def clear_all_context(self):
+        """Removes all documents from the context_scrolls collection."""
+        try:
+            count = self.context_scrolls.count()
+            if count > 0:
+                ids = self.context_scrolls.get(limit=count, include=[])['ids']
+                if ids: self.context_scrolls.delete(ids=ids)
+            print_msg("Council", "The context scrolls have been cleared.")
+        except Exception as e:
+            print_msg("Council", f"Error clearing context scrolls - {e}")
+
+    def clear_all_reports(self):
+        """Removes all documents from the task_reports collection."""
+        try:
+            count = self.task_reports.count()
+            if count > 0:
+                ids = self.task_reports.get(limit=count, include=[])['ids']
+                if ids: self.task_reports.delete(ids=ids)
+            print_msg("Council", "The after-action reports are burned.")
+        except Exception as e:
+            print_msg("Council", f"Error clearing task reports - {e}")
+
+    def store_context_scroll(self, filepath, content):
+        """Upserts a file's content into the context_scrolls collection."""
+        try:
+            norm_filepath = os.path.normpath(filepath).replace('\\', '/')
+            self.context_scrolls.upsert(documents=[content], metadatas={"filepath": norm_filepath}, ids=[norm_filepath])
+        except Exception as e:
+             print_msg("Council", f"Error storing context scroll {filepath} - {e}")
+
+    def query_context_scrolls(self, query_text, n_results=10):
+        """Queries the context_scrolls collection for relevant documents."""
+        try:
+            count = self.context_scrolls.count()
+            if count == 0: return "No context scrolls available in the archives."
+            results = self.context_scrolls.query(query_texts=[query_text], n_results=min(n_results, count), include=["metadatas", "documents"])
+            documents = results.get('documents')
+            metadatas = results.get('metadatas')
+            if not documents or not documents[0]: return "No relevant context found for this query."
+            scrolls = documents[0]
+            metas = metadatas[0] if metadatas and metadatas[0] else []
+            full_context = "--- RELEVANT CONTEXT SCROLLS ---\n\n"
+            for i, doc in enumerate(scrolls):
+                filepath = metas[i].get('filepath', 'Unknown File') if i < len(metas) else 'Unknown File'
+                full_context += f"File: '{filepath}'\n```\n{doc}\n```\n\n"
+            return full_context
+        except Exception as e:
+            print_msg("Council", f"Error querying context scrolls: {e}")
+            return "Error: Could not query context scrolls."
+
+    def store_task_report(self, task_desc, report_content):
+        """Stores a report/log entry related to a task."""
+        try:
+            report_id = f"report_{time.time()}_{hash(str(task_desc))%10000}"
+            report_content_str = str(report_content)
+            self.task_reports.add(ids=[report_id], documents=[report_content_str], metadatas=[{"source_task": str(task_desc), "timestamp": time.time()}])
+            if "FAIL" in report_content_str.upper() or "CRITICAL" in report_content_str.upper():
+                 print_msg("Council", "CRITICAL report stored in archives.")
+        except Exception as e:
+            print_msg("Council", f"Error storing task report - {e}")
+
+    def get_all_reports_as_string(self):
+        """Retrieves all stored reports, sorted by timestamp, as a single string."""
+        try:
+            count = self.task_reports.count()
+            if count == 0: return "No after-action reports found."
+            reports = self.task_reports.get(limit=count, include=["metadatas", "documents"])
+            if not reports or not reports.get('ids'): return "No after-action reports found."
+            full_report_string = "--- AFTER-ACTION REPORTS ---\n\n"
+            report_items = []
+            if reports.get('metadatas') and reports.get('documents') and len(reports['ids']) == len(reports['metadatas']) == len(reports['documents']):
+                report_items = [(reports['metadatas'][i], reports['documents'][i]) for i in range(len(reports['ids']))]
+                report_items.sort(key=lambda item: item[0].get('timestamp', 0) if item[0] else 0)
+            else:
+                print_msg("Council", "Warning - Mismatch in report data structure while retrieving.")
+                if reports.get('documents'):
+                    for doc in reports['documents']:
+                         full_report_string += f"Report (Unknown Task):\n```\n{str(doc)}\n```\n\n"
+                    return full_report_string
+                else:
+                    return "Error retrieving reports due to data mismatch."
+            for metadata, doc in report_items:
+                task = metadata.get('source_task', 'Unknown Task') if metadata else 'Unknown Task'
+                doc_str = str(doc)
+                full_report_string += f"Report from task: '{task}'\n```\n{doc_str}\n```\n\n"
+            return full_report_string
+        except Exception as e:
+            print_msg("Council", f"Error retrieving reports - {e}")
+            return "Error retrieving reports."
+
+# --- AGENT "BRAIN" DEFINITIONS (v1.2.0) ---
+
+# --- Advisor: Pydantic Models for Planning (using Outlines) ---
+class FileStructure(BaseModel):
+    """Defines a file or directory within the project structure."""
+    path: str = Field(..., description="The full absolute path to the file or directory. E.g., 'C:/Warcamp/output_project/src/main.py' or 'C:/Warcamp/output_project/src'")
+    type: Literal['file', 'directory'] = Field(..., description="MUST be exactly 'file' or 'directory' (lowercase).")
+    description: str = Field(..., description="A brief one-sentence description of this file/directory's purpose.")
+
+class ProjectPlan(BaseModel):
+    """Defines the overall project plan including README, technical plan, and file structure."""
+    readme_content: str = Field(..., description="The full, well-formatted Markdown content for the README.md file.")
+    plan_content: str = Field(..., description="The detailed technical plan content (Markdown) for Sarge, outlining logic, libraries, and technical approach.")
+    file_structure: List[FileStructure] = Field(..., description="A list defining all files and directories required for the project structure.")
+
+# --- Advisor: Planner Agent ---
+class Advisor:
+    """Uses ADVISOR_MODEL and Outlines to generate README.md, PLAN.md, and file structure."""
+    def __init__(self, model_name=ADVISOR_MODEL, council_db: CouncilDB = None, workshop_path: str = "."):
+        self.model_name = model_name
+        self.model = outlines_models.openai(model_name, base_url=OLLAMA_OPENAI_ENDPOINT, api_key="ollama")
+        self.council_db = council_db
+        self.workshop_path = os.path.abspath(workshop_path)
+        if not council_db: raise ValueError("CouncilDB instance is required for Advisor.")
+        print(f"Advisor on deck. (Using {self.model_name})")
+
+    def create_project_plan(self, user_intent: str) -> Optional[ProjectPlan]:
+        """Generates the complete project plan using a Chain-of-Thought prompt."""
+        print_msg("Advisor", f"Analyzing Chief's intent and formulating project plan: '{user_intent}'")
+        print_msg("Advisor", "Searching archives for strategic context...")
+        context_string = self.council_db.query_context_scrolls(user_intent, n_results=10)
+
+        system_prompt = f"""
+You are the Advisor, the chief planner for Warcamp. Your mission is to take the user's goal and generate a complete project plan as a single, valid JSON object conforming EXACTLY to the provided schema.
+The user's Workshop (output directory) is: '{self.workshop_path}'
+ALL file paths in the 'file_structure' list MUST be ABSOLUTE paths starting with this workshop path.
+
+**Chain of Thought:**
+1.  **Analyze Goal:** First, understand the user's intent: "{user_intent}". Consider any relevant context.
+2.  **Create README Content:** Second, write clear, concise Markdown content for a README.md file. This should explain the project's purpose, key features, required libraries (if any), and basic usage instructions for the end-user.
+3.  **Create Technical Plan Content:** Third, write detailed technical plan content (Markdown) for a PLAN.md file. This is for Sarge (the coding agent). Specify the programming language, main libraries/frameworks, core logic, algorithms, function signatures, and any specific technical requirements or constraints.
+4.  **Define File Structure:** Fourth, create a JSON list named 'file_structure'. Each item MUST define 'path' (absolute, starting with '{self.workshop_path}'), 'type', and a brief 'description'.
+    **CRITICAL RULE:** The 'type' field for each item in 'file_structure' MUST be EXACTLY the lowercase string 'file' or 'directory'.
+
+**Context from Archives:**
+{context_string}
+
+**User Intent:**
+"{user_intent}"
+
+**Your Output (Must be ONLY the valid JSON object conforming to the schema below):**
+"""
+        try:
+            generator = outlines_generate.json(self.model, ProjectPlan)
+            generated_plan = generator(system_prompt, max_tokens=8192)
+
+            if isinstance(generated_plan, ProjectPlan):
+                print_msg("Advisor", "Project plan generated and validated successfully by Outlines.")
+                plan_valid = True
+                if not generated_plan.file_structure:
+                    print_msg("Advisor", "Warning: The generated plan has an empty file structure.")
+                else:
+                    for item in generated_plan.file_structure:
+                        standardized_path = os.path.normpath(item.path).replace('\\', '/')
+                        standardized_workshop_path = os.path.normpath(self.workshop_path).replace('\\', '/')
+                        if not os.path.isabs(standardized_path) or not standardized_path.startswith(standardized_workshop_path):
+                            print_msg("Advisor", f"ERROR: Plan contains invalid path: {item.path}. It must be absolute and start with {self.workshop_path}.")
+                            plan_valid = False
+                            potential_fix = os.path.abspath(os.path.join(self.workshop_path, item.path.lstrip('/\\')))
+                            if potential_fix.startswith(standardized_workshop_path):
+                                print_msg("Advisor", f"Attempting fix: Setting path to {potential_fix}")
+                                item.path = potential_fix.replace('\\', '/')
+                                plan_valid = True
+                            else:
+                                break
+                if not plan_valid:
+                     raise ValueError("Plan contains paths outside the workshop directory.")
+                return generated_plan
+            else:
+                print_msg("Advisor", "Outlines output was not a Pydantic object. This is unexpected.")
+                raise TypeError("Outlines generator did not return the expected Pydantic model instance.")
+        except (ValidationError, json.JSONDecodeError, TypeError, ValueError) as val_err:
+            print_msg("Advisor", f"CRITICAL: Plan generation or validation failed: {val_err}")
+            if isinstance(val_err, ValidationError): print(f"DEBUG: Pydantic Validation Errors:\n{val_err}")
+            return None
+        except Exception as e:
+            print_msg("Advisor", f"CRITICAL: Planning phase failed! {type(e).__name__} - {e}")
+            import traceback; traceback.print_exc()
+            return None
+
+# --- Sarge: Templater/Debugger Agent ---
+class Sarge:
+    """Handles template creation and debugging tasks using the SARGE_MODEL and Guidance."""
+    def __init__(self, model_name=SARGE_MODEL):
+        self.model = GuidanceOpenAI(model=model_name, base_url=OLLAMA_OPENAI_ENDPOINT, api_key="ollama")
+        self.model_name = model_name
+        print(f"Sarge on deck. (Using {self.model_name})")
+
+    def create_template(self, file_path: str, plan_content: str, file_description: str) -> str:
+        """Generates the initial template content for a file, including the Orch Task."""
+        print_msg("Sarge", f"Writing template and instructions for: {file_path}")
+        try:
+            guidance_program_str = r"""```guidance
+You are a '{{model_name}}' model acting as Sarge. Your job is to create a template file for an Orch agent to complete.
+Read the overall project plan and the specific purpose of the target file, then write the necessary boilerplate code and a clear, commented task for the Orch.
+
+**Project Plan:**
+{{plan_content}}
+
+**File to Create:** {{file_path}}
+**File's Specific Purpose:** {{file_description}}
+
+**Instructions:**
+1.  Write ONLY essential boilerplate code (e.g., imports, basic class/function structure) for THIS file.
+2.  Write a single, clear, HTML-style comment `<!-- ORCH_TASK: [instructions] -->` that tells the Orch *exactly* what code needs to be written.
+3.  Do NOT write the final implementation code yourself. Only write the boilerplate and the task comment.
+4.  Ensure your entire output is valid code syntax for the target file type.
+
+**Template for {{file_path}}:**
+```{{#capture 'file_template'}}{{gen 'template_code' temperature=0.0 max_tokens=2048 stop='```'}}{{/capture}}```
+```"""
+            guidance_program = guidance(guidance_program_str, llm=self.model)
+            response = guidance_program(model_name=self.model_name, plan_content=plan_content, file_path=file_path, file_description=file_description)
+            template_content = response['file_template'].strip()
+
+            if "<!-- ORCH_TASK:" not in template_content:
+                template_content += "\n\n<!-- ORCH_TASK: Sarge failed to generate a specific task. Please review the plan and implement this file's purpose. -->"
+            template_content = re.sub(r'([^\n])(<!-- ORCH_TASK:)', r'\1\n\2', template_content)
+            return template_content
+        except Exception as e:
+            print_msg("Sarge", f"CRITICAL: Failed to create template. Error: {type(e).__name__} - {e}")
+            import traceback; traceback.print_exc()
+            return f"// SARGE ERROR: Could not generate template for {file_path}.\n// Error: {e}\n\n<!-- ORCH_TASK: Implement this file's purpose based on the project plan. -->"
+
+    def create_debug_task(self, broken_code: str, error_message: str) -> str:
+        """Generates a new ORCH_TASK comment instructing how to fix a bug."""
+        print_msg("Sarge", f"Analyzing failure and writing debug instructions...")
+        try:
+            guidance_program_str = r"""```guidance
+You are a '{{model_name}}' model acting as Sarge, specialized in debugging.
+An Orch agent's code failed. Analyze the error and write ONLY a NEW HTML-style task comment `<!-- ORCH_TASK: [fix instructions] -->` explaining how to fix the bug.
+
+**Broken Code:**
+```
+{{broken_code}}
+```
+
+**Error Message:**
+```
+{{error_message}}
+```
+
+**Analysis & New Task (MUST be only the HTML-style comment `<!-- ORCH_TASK: ... -->`):**
+{{gen 'new_task' temperature=0.0 max_tokens=512 stop="-->"}}-->
+```"""
+            guidance_program = guidance(guidance_program_str, llm=self.model)
+            response = guidance_program(model_name=self.model_name, broken_code=broken_code, error_message=error_message)
+            new_task = response['new_task'].strip()
+            if not new_task.startswith("<!--"): new_task = "<!-- ORCH_TASK: " + new_task
+            if not new_task.endswith("-->"): new_task += " -->"
+            return new_task
+        except Exception as e:
+            print_msg("Sarge", f"CRITICAL: Failed to create debug task. Error: {type(e).__name__} - {e}")
+            import traceback; traceback.print_exc()
+            return f"<!-- ORCH_TASK: Sarge failed to create a debug task. Previous error: {error_message}. Please fix the code based on the plan. -->"
+
+# --- Orch: Code Builder Agent ---
+class Orch:
+    """Handles code generation and command execution using the ORCH_MODEL."""
+    def __init__(self, model_name=ORCH_MODEL, base_dir="."):
+        self.model = GuidanceOpenAI(model=model_name, base_url=OLLAMA_OPENAI_ENDPOINT, api_key="ollama")
+        self.model_name = model_name
+        self.base_dir = os.path.abspath(base_dir)
+        os.makedirs(self.base_dir, exist_ok=True)
+        print(f"Orch ready for work. (Using {self.model_name} in {self.base_dir})")
+
+    def execute_template_task(self, prefix: str, suffix: str, task_instructions: str) -> str:
+        """Generates code using a Fill-in-the-Middle (FIM) prompt via Guidance."""
+        print_msg("Orch", "Work work... following instructions in template.")
+        try:
+            guidance_program_str = r"""```guidance
+You are a coding agent. Complete the following code based on the task.
+TASK: {{task_instructions}}
+---
+<|fim_prefix|>{{prefix}}<|fim_suffix|>{{suffix}}<|fim_middle|>{{gen 'generated_code' temperature=0.1 max_tokens=4096 stop='<|file_separator|>'}}
+```"""
+            guidance_program = guidance(guidance_program_str, llm=self.model)
+            response = guidance_program(prefix=prefix, suffix=suffix, task_instructions=task_instructions)
+            return response['generated_code']
+        except Exception as e:
+            print_msg("Orch", f"CRITICAL: Code generation failed. Error: {type(e).__name__} - {e}")
+            import traceback; traceback.print_exc()
+            return f" # ORCH ERROR: Code generation failed. {e}"
+
+    def execute_shell_command(self, command: str, council_db: CouncilDB, task_desc: str):
+        """Executes a shell command in the workshop directory and logs the output."""
+        print_msg("Orch", f"Executing command: `{command}`")
+        try:
+            process = subprocess.run(command, shell=True, cwd=self.base_dir, capture_output=True, text=True, timeout=300, encoding='utf-8', errors='ignore')
+            output_log = f"--- STDOUT ---\n{process.stdout}\n--- STDERR ---\n{process.stderr}\n"
+            if process.returncode == 0:
+                print_msg("Orch", f"Command `{command}` executed successfully.")
+                council_db.store_task_report(task_desc, f"OK: Command `{command}` succeeded.\n{output_log}")
+                return True, output_log
+            else:
+                print_msg("Sarge", f"Command `{command}` FAILED with exit code {process.returncode}.")
+                council_db.store_task_report(task_desc, f"FAIL: Command `{command}` failed.\n{output_log}")
+                return False, output_log
+        except subprocess.TimeoutExpired:
+            error_msg = f"FAIL: Command `{command}` timed out after 5 minutes."
+            print_msg("Sarge", error_msg)
+            council_db.store_task_report(task_desc, error_msg)
+            return False, error_msg
+        except Exception as e:
+            error_msg = f"FAIL: Error executing command `{command}`: {e}"
+            print_msg("Sarge", error_msg)
+            council_db.store_task_report(task_desc, error_msg)
+            return False, error_msg
+
+# --- TASKLIST.MD MANAGER (v1.2.0) ---
+class TaskListManager:
+    """Manages the file-based task queue in TASKLIST.md."""
+    def __init__(self, workshop_path: str):
+        self.workshop_path = workshop_path
+        self.tasklist_path = os.path.join(self.workshop_path, TASKLIST_FILENAME)
+
+    def create_initial_tasks(self, project_plan: ProjectPlan):
+        print_msg("Sarge", f"Creating task list at {self.tasklist_path}")
+        content = "# Warcamp Task List\n\n"
+        task_num = 1
+        file_tasks = [item for item in project_plan.file_structure if item.type == 'file']
+        
+        content += "## Phase 1: Templating (Sarge)\n"
+        if not file_tasks: content += "- No files to template.\n"
+        else:
+            for item in file_tasks:
+                content += f"- [ ] Task {task_num} (template): `{os.path.basename(item.path)}` - {item.description}\n"
+                task_num += 1
+
+        content += "\n## Phase 2: Work (Orch)\n"
+        if not file_tasks: content += "- No files to work on.\n"
+        else:
+            for item in file_tasks:
+                content += f"- [ ] Task {task_num} (work): `{os.path.basename(item.path)}` - Implement code based on the ORCH_TASK comment.\n"
+                task_num += 1
+        
+        content += "\n## Phase 3: Execution (Orch)\n"
+        content += f"- [ ] Task {task_num} (run): `echo 'Project build complete. Manual testing can now begin.'` - Final verification step.\n"
+
+        with open(self.tasklist_path, 'w', encoding='utf-8') as f: f.write(content)
+        print_msg("Sarge", "Task list created.")
+
+    def get_next_task(self):
+        if not os.path.exists(self.tasklist_path): return None
+        with open(self.tasklist_path, 'r', encoding='utf-8') as f: lines = f.readlines()
+        
+        for line in lines:
+            if line.strip().startswith("- [ ]"):
+                match = re.match(r'-\s*\[\s*\]\s*Task\s*([\d.]+)\s*\(([^)]+)\):\s*(.*)', line)
+                if match:
+                    task_num_str, task_type, desc_part = match.groups()
+                    path = None
+                    path_match = re.search(r'`([^`]+)`', desc_part)
+                    if path_match:
+                        path_str = path_match.group(1)
+                        # Distinguish file paths from commands
+                        if task_type in ['template', 'work']:
+                            # Find the full path from the plan for accuracy
+                            path = next((item.path for item in project_plan.file_structure if os.path.basename(item.path) == path_str), None)
+                            if not path: path = os.path.join(self.workshop_path, path_str) # Fallback
+                        else: # For 'run' tasks, the backticked part is the command
+                            pass
+                    return {"full_line": line.strip(), "task_num": task_num_str, "type": task_type, "path": path, "description": desc_part.strip()}
+        return None
+
+    def mark_task_complete(self, full_line: str):
+        with open(self.tasklist_path, 'r', encoding='utf-8') as f: lines = f.readlines()
+        new_lines = [line.replace("[ ]", "[x]", 1) if line.strip() == full_line else line for line in lines]
+        with open(self.tasklist_path, 'w', encoding='utf-8') as f: f.writelines(new_lines)
+
+    def add_debug_task(self, failed_task: dict):
+        with open(self.tasklist_path, 'r', encoding='utf-8') as f: lines = f.readlines()
+        new_lines = []
+        for line in lines:
+            new_lines.append(line)
+            if line.strip() == failed_task['full_line']:
+                new_task_line = f"- [ ] Task {failed_task['task_num']}.D (work): `{os.path.basename(failed_task['path'])}` - DEBUG: Fix the error from the previous attempt.\n"
+                new_lines.append(new_task_line)
+        with open(self.tasklist_path, 'w', encoding='utf-8') as f: f.writelines(new_lines)
+
+# --- UTILITY FUNCTIONS ---
+def parse_template(template_content: str):
+    """Parses the template content to find the ORCH_TASK and split into prefix/suffix."""
+    task_match = re.search(r'<!--\s*ORCH_TASK:\s*([\s\S]*?)\s*-->', template_content, re.DOTALL)
+    if not task_match:
+        print_msg("Orch", "No ORCH_TASK comment found in the template. Cannot proceed.")
+        return None, None, None
+    task_instructions = task_match.group(1).strip()
+    prefix = template_content[:task_match.start()]
+    suffix = template_content[task_match.end():]
+    if not task_instructions:
+         print_msg("Orch", "Warning: ORCH_TASK comment is empty.")
+         return prefix, suffix, ""
+    return prefix, suffix, task_instructions
+
+def save_filled_template(file_path: str, prefix: str, generated_code: str, suffix: str):
+    """Reconstructs the file content and saves it, replacing the task comment."""
+    try:
+        generated_code_cleaned = re.sub(r'<\|fim_(prefix|suffix|middle|pad)\|>', '', generated_code).replace("<|file_separator|>", "").strip()
+        full_content = prefix.rstrip() + '\n' + generated_code_cleaned + '\n' + suffix.lstrip()
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        with open(file_path, 'w', encoding='utf-8') as f: f.write(full_content)
+        print_msg("Orch", f"Successfully updated file: {file_path}")
+        return True
+    except Exception as e:
+        print_msg("Orch", f"CRITICAL: Failed to write updated file {file_path}: {e}")
+        return False
+
+def get_user_path(prompt):
+    """Prompts the user for a directory path, validates it, and offers creation."""
+    while True:
+        path = input(f"> {prompt}\n> ").strip().strip('"')
+        if not path: print("Chief: 'Path cannot be empty.'"); continue
+        path = os.path.expanduser(path.rstrip('/\\').replace('\\', '/'))
+        abs_path = os.path.abspath(path)
+        if not os.path.exists(abs_path):
+             try:
+                 create = input(f"Chief: Directory '{abs_path}' does not exist. Create it? (y/n)\n> ").lower().strip()
+                 if create == 'y': os.makedirs(abs_path); print(f"Warcamp: 'Created directory: {abs_path}'"); return abs_path
+                 else: print("Chief: 'Please provide a different path.'"); continue
+             except Exception as e: print(f"Warcamp: 'Error creating directory: {e}.'"); continue
+        elif not os.path.isdir(abs_path): print(f"Chief: '{abs_path}' is not a directory."); continue
+        else: return abs_path
+
+# --- The Main "Warcamp" Loop ---
+project_plan = None # Global to be accessible by TaskListManager
+def main():
+    global project_plan
+    print("--- Orc Warcamp AI Coding System (v1.2.0) ---")
+    try:
+        ollama.list(); print("Ollama connection verified.")
+        print("Council: 'Agents seem ready.'")
+    except Exception as e:
+        print(f"FATAL: Ollama connection failed: {e}\nIs Ollama running and models pulled (e.g., 'ollama pull {ADVISOR_MODEL}')?"); return
+
+    print("\nChief, establish work zones.")
+    warcamp_path = get_user_path("Enter ABSOLUTE path for Warcamp's configuration & logs (e.g., C:/Warcamp)")
+    workshop_path = get_user_path(f"Enter ABSOLUTE path for the project Workshop (e.g., {os.path.join(warcamp_path, 'output_project')})")
+    db_dir_name = "warcamp_db"; db_path = os.path.join(warcamp_path, db_dir_name)
+
+    try:
+        council_db = CouncilDB(db_path=db_path)
+        advisor = Advisor(council_db=council_db, workshop_path=workshop_path)
+        sarge = Sarge()
+        orch = Orch(base_dir=workshop_path)
+        tasklist_manager = TaskListManager(workshop_path=workshop_path)
+    except Exception as init_e:
+        print(f"FATAL: Initialization of components failed: {init_e}"); return
+
+    print("---------------------------------")
+    print_msg("Council", "Warcamp initialized. Ready for intent.")
+    while True:
+        print("\n" + "="*40)
+        try: intent_raw = input("Chief: 'What is your command? ('quit' to exit)'\n> ").strip()
+        except EOFError: print("\nChief: 'EOF detected. Shutting down Warcamp.'"); break
+        print("="*40)
+        if intent_raw.lower() in ['quit', 'exit', 'bye']: print("Chief: 'Dismissed.'"); break
+        if not intent_raw: print("Chief: 'Speak up! I need an intent.'"); continue
+
+        # --- PREPARATION PHASE ---
+        print_msg("Council", "Preparing for new campaign. Clearing old reports and task list.")
+        council_db.clear_all_reports()
+        if os.path.exists(tasklist_manager.tasklist_path): os.remove(tasklist_manager.tasklist_path)
+        print_msg("Council", "Loading context from Warcamp and Workshop directories...")
+        load_context_from_directory(warcamp_path, council_db, db_dir_name)
+        load_context_from_directory(workshop_path, council_db, db_dir_name)
+
+        # --- PLANNING PHASE ---
+        print("\n--- Planning Phase (Advisor) ---")
+        project_plan = advisor.create_project_plan(intent_raw)
+        if not project_plan:
+            print_msg("Council", "The Advisor failed to create a viable plan. Please refine your intent, Chief."); continue
+
+        print_msg("Advisor", "Plan complete. Saving README.md and PLAN.md to workshop.")
+        with open(os.path.join(workshop_path, "README.md"), 'w', encoding='utf-8') as f: f.write(project_plan.readme_content)
+        with open(os.path.join(workshop_path, "PLAN.md"), 'w', encoding='utf-8') as f: f.write(project_plan.plan_content)
+
+        print_msg("Sarge", "Establishing the workshop structure based on the plan...")
+        for item in project_plan.file_structure:
+            if not os.path.abspath(item.path).startswith(os.path.abspath(workshop_path)):
+                print_msg("Sarge", f"SKIPPING unsafe path defined in plan: {item.path}"); continue
+            if item.type == 'directory': os.makedirs(item.path, exist_ok=True)
+            elif item.type == 'file': os.makedirs(os.path.dirname(item.path), exist_ok=True)
+        
+        tasklist_manager.create_initial_tasks(project_plan)
+
+        # --- EXECUTION LOOP (TEMPLATE, WORK, RUN) ---
+        print("\n--- Execution Phase (Sarge & Orch) ---")
+        retry_counts = {}
+        while True:
+            current_task = tasklist_manager.get_next_task()
+            if not current_task:
+                print_msg("Council", "All tasks completed! Campaign successful!"); break
+            
+            task_num, task_type, file_path, desc, full_line = current_task['task_num'], current_task['type'], current_task['path'], current_task['description'], current_task['full_line']
+            print_msg("Council", f"Starting Task {task_num} ({task_type}): {desc}")
+            task_success, error_output = False, "Unknown error."
+
+            try:
+                if task_type == 'template':
+                    file_item = next((f for f in project_plan.file_structure if f.path == file_path), None)
+                    if file_item:
+                        template_content = sarge.create_template(file_path, project_plan.plan_content, file_item.description)
+                        with open(file_path, 'w', encoding='utf-8') as f: f.write(template_content)
+                        task_success = True
+                    else: error_output = f"File {file_path} not found in project plan."
+                
+                elif task_type == 'work':
+                    if not os.path.exists(file_path): raise FileNotFoundError(f"File {file_path} not found for 'Work' task.")
+                    with open(file_path, 'r', encoding='utf-8') as f: content = f.read()
+                    prefix, suffix, instructions = parse_template(content)
+                    if prefix is None:
+                        print_msg("Orch", f"Skipping {os.path.basename(file_path)}, no valid ORCH_TASK found."); task_success = True
+                    else:
+                        generated_code = orch.execute_template_task(prefix, suffix, instructions)
+                        task_success = save_filled_template(file_path, prefix, generated_code, suffix)
+                        if not task_success: error_output = f"Orch failed to save generated code to {file_path}."
+
+                elif task_type == 'run':
+                    command_match = re.search(r'`([^`]+)`', desc)
+                    if command_match:
+                        task_success, error_output = orch.execute_shell_command(command_match.group(1), council_db, desc)
+                    else: error_output = f"Cannot parse command from task: {desc}"
+
+                else:
+                    print_msg("Council", f"Warning: Unknown task type '{task_type}'. Skipping."); task_success = True
+
+            except Exception as e:
+                error_output = f"CRITICAL: Unhandled error during task '{desc}': {e}"
+                print_msg("Council", error_output); import traceback; traceback.print_exc()
+
+            # --- Process Task Outcome ---
+            if task_success:
+                tasklist_manager.mark_task_complete(full_line)
+                retry_counts.pop(full_line, None)
+                print_msg("Council", f"Task {task_num} completed successfully.")
+            else:
+                current_retries = retry_counts.get(full_line, 0) + 1
+                retry_counts[full_line] = current_retries
+                print_msg("Sarge", f"Task {task_num} FAILED! (Attempt {current_retries}/{MAX_RETRIES})")
+                council_db.store_task_report(desc, f"Attempt {current_retries} Failed. Error: {error_output}")
+
+                if current_retries >= MAX_RETRIES:
+                    print_msg("Sarge", f"Task {task_num} failed max retries. Escalating to debug.")
+                    if task_type == 'work' and file_path and os.path.exists(file_path):
+                        with open(file_path, 'r', encoding='utf-8') as f: broken_code = f.read()
+                        new_debug_task = sarge.create_debug_task(broken_code, error_output)
+                        with open(file_path, 'w', encoding='utf-8') as f: f.write(new_debug_task)
+                        tasklist_manager.add_debug_task(current_task)
+                        tasklist_manager.mark_task_complete(full_line) # Mark original failed task done
+                        retry_counts.pop(full_line, None)
+                        print_msg("Sarge", f"Added debug task to {TASKLIST_FILENAME}. Orch will retry.")
+                    else:
+                        print_msg("Sarge", f"Cannot automatically debug this task. Stopping campaign.")
+                        break # Stop campaign
+                else:
+                    time.sleep(2) # Delay before retrying
+
+    print(f"\n--- Warcamp shutting down. ---")
+
+if __name__ == "__main__":
+    main()
