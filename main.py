@@ -590,8 +590,9 @@ async def admin_exec(request: AdminExecRequest):
 
 # -----------------------------------------------------------------
 # --- NEW: Live Chat WebSocket (V4.1) ---
+# --- BUG FIX V4.2: Added 'tags' to make it visible ---
 # -----------------------------------------------------------------
-@app.websocket("/ws/council-chat")
+@app.websocket("/ws/council-chat", tags=["Live Chat"])
 async def websocket_council_chat(websocket: WebSocket):
     """
     Handles a live, streaming chat session with the 'council' model.
@@ -825,7 +826,7 @@ async def run_smoke_test_logic(base_url: str, model_filename: str) -> List[Dict[
         # Step 4: Add to Memory
         try:
             payload = {"text": "The secret code is 'work work'.", "doc_id": "smoke_test_doc"}
-            async with session.post(f"{base_url}/api/v1/memory/add", json=payload) as r:
+            async with session.post(f"{base_url}/api/v1/memory/add", json=payload).as_view() r:
                 r.raise_for_status()
                 data = await r.json()
                 assert data.get("total_documents", 0) > 0
