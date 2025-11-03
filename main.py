@@ -589,7 +589,7 @@ async def admin_exec(request: AdminExecRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 # -----------------------------------------------------------------
-# --- NEW: Live Chat WebSocket (V4.6) ---
+# --- Live Chat WebSocket (V4.6) ---
 # --- Refactored to APIRouter to make it visible in docs ---
 # -----------------------------------------------------------------
 chat_router = APIRouter(tags=["Live Chat"])
@@ -1032,7 +1032,7 @@ async def run_smoke_test_endpoint():
 # --- Main Entry Point ---
 # -----------------------------------------------------------------
 
-# --- V4.6: Add the chat router to the main app ---
+# --- V4.7: Add the chat router to the main app ---
 app.include_router(chat_router)
 
 if __name__ == "__main__":
