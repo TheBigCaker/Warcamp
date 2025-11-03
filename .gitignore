@@ -7,3 +7,7 @@ __pycache__/
 .vs/
 *.suo
 *.user
+
+# Models - Do not commit GGUF files
+*.gguf
+*.bin

@@ -4,13 +4,34 @@ from pydantic import BaseModel
 import subprocess
 import os
 import sys
+import logging
+from llama_cpp import Llama
 
-# TODO: Import llama_cpp dynamically after checking installation
-# from llama_cpp import Llama
+# -----------------------------------------------------------------
+# Logging Setup
+# -----------------------------------------------------------------
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout) # Log to console
+    ]
+)
+log = logging.getLogger(__name__)
 
 # -----------------------------------------------------------------
 # Warcamp API Initializing
 # -----------------------------------------------------------------
+
+# Read the Model Directory from the environment variable set by the PowerShell script
+MODELS_ROOT = os.environ.get("WARCAMP_MODELS_ROOT")
+if not MODELS_ROOT:
+    log.error("FATAL ERROR: WARCAMP_MODELS_ROOT environment variable not set.")
+    sys.exit(1)
+
+log.info(f"Warcamp 🏕️ initializing... Model Root: {MODELS_ROOT}")
+
 app = FastAPI(
     title="Warcamp 🏕️ - Dev Orch Backend",
     description="API for orchestrating local LLM agents (Gemma, CodeGemma) via llama-cpp-python.",
@@ -22,7 +43,7 @@ app = FastAPI(
 # -----------------------------------------------------------------
 class LoadModelRequest(BaseModel):
     model_name: str # e.g., "TheCouncil_Gemma1b"
-    model_path: str # Full path to the .gguf file
+    model_filename: str # e.g., "gemma-2b-it.gguf". Must be inside MODELS_ROOT
     n_gpu_layers: int = -1 # -1 = all layers, 0 = no layers
     n_ctx: int = 4096
 
@@ -67,32 +88,59 @@ async def load_model(request: LoadModelRequest):
     """
     Load a GGUF model into VRAM and make it available for inference.
     """
-    # TODO: Add logic to load the model using Llama(model_path=...)
-    # TODO: Store the loaded model in the 'loaded_models' dict
-    # loaded_models[request.model_name] = Llama(...)
-    
     if request.model_name in loaded_models:
+        log.warning(f"Load request for '{request.model_name}', which is already loaded.")
         return {"message": f"Model '{request.model_name}' is already loaded."}
+
+    model_path = os.path.join(MODELS_ROOT, request.model_filename)
     
-    # Placeholder response
-    return {"message": f"TODO: Load model '{request.model_name}' from {request.model_path}"}
+    if not os.path.exists(model_path):
+        log.error(f"Model file not found at path: {model_path}")
+        raise HTTPException(status_code=404, detail=f"Model file not found: {request.model_filename}")
+
+    log.info(f"Loading model '{request.model_name}' from '{model_path}'...")
+    log.info(f"  n_gpu_layers: {request.n_gpu_layers}, n_ctx: {request.n_ctx}")
+
+    try:
+        model = Llama(
+            model_path=model_path,
+            n_gpu_layers=request.n_gpu_layers,
+            n_ctx=request.n_ctx,
+            verbose=True
+        )
+        loaded_models[request.model_name] = model
+        log.info(f"SUCCESS: Model '{request.model_name}' is loaded and online.")
+        return {"message": f"Model '{request.model_name}' loaded successfully."}
+    except Exception as e:
+        log.error(f"Failed to load model '{request.model_name}'. Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/v1/models/unload", tags=["Model Management"])
 async def unload_model(model_name: str):
     """
     Unload a model from VRAM to free up resources.
     """
-    # TODO: Add logic to get model from 'loaded_models', call del, and clear VRAM
     if model_name not in loaded_models:
+        log.warning(f"Unload request for '{model_name}', but it's not loaded.")
         raise HTTPException(status_code=404, detail=f"Model '{model_name}' not found.")
     
-    # Placeholder response
-    return {"message": f"TODO: Unload model '{model_name}'."}
+    try:
+        log.info(f"Unloading model '{model_name}'...")
+        # Get the model, delete it, and force garbage collection
+        model_instance = loaded_models.pop(model_name)
+        del model_instance
+        # TODO: Add torch.cuda.empty_cache() if using GPU tensors explicitly
+        
+        log.info(f"SUCCESS: Model '{model_name}' unloaded and VRAM freed.")
+        return {"message": f"Model '{model_name}' unloaded successfully."}
+    except Exception as e:
+        log.error(f"An error occurred while unloading '{model_name}'. Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/v1/models/list", tags=["Model Management"])
 async def list_models():
     """
-Signature for C_S_START_BATTLE.
+    List all currently loaded models.
     """
     return {"loaded_models": list(loaded_models.keys())}
 
@@ -103,11 +151,14 @@ async def generate_completion(request: GenerateRequest):
     """
     Run inference on a pre-loaded model.
     """
-    # TODO: Get model from 'loaded_models'
-    # TODO: Run model_instance.create_completion(prompt=...)
     if request.model_name not in loaded_models:
         raise HTTPException(status_code=404, detail=f"Model '{request.model_name}' not found.")
 
+    # TODO: Get model from 'loaded_models'
+    model = loaded_models[request.model_name]
+    
+    # TODO: Run model.create_completion(prompt=...)
+    
     # Placeholder response
     return {"message": f"TODO: Run generation on '{request.model_name}' with prompt: '{request.prompt[:50]}...'"}
 
@@ -130,8 +181,8 @@ async def admin_exec(request: AdminExecRequest):
     This is for the Council to self-manage the environment.
     """
     # TODO: Add security (e.g., API key)
+    log.info(f"AdminExec executing command: {request.command}")
     try:
-        # We use subprocess.run for simplicity
         process = subprocess.run(
             request.command,
             shell=True,
@@ -145,6 +196,7 @@ async def admin_exec(request: AdminExecRequest):
             return_code=process.returncode
         )
     except Exception as e:
+        log.error(f"AdminExec failed. Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # --- Main Entry Point ---
@@ -157,4 +209,5 @@ if __name__ == "__main__":
     For production, you would use:
     'uvicorn main:app --host 0.0.0.0 --port 8000 --reload'
     """
+    log.info(f"Starting Uvicorn server in debug mode (reload=True)...")
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
