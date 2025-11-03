@@ -121,27 +121,27 @@ app = FastAPI(
 # Pydantic Models (Request/Response Bodies)
 # -----------------------------------------------------------------
 class LoadModelRequest(BaseModel):
-    model_name: str = Field(..., example="council") # The nickname you will use for this model
+    model_name: str = Field(..., json_schema_extra={'example': 'council'}) # The nickname you will use for this model
     model_filename: ModelFileEnum # This will be a drop-down in /docs
     n_gpu_layers: int = -1 # -1 = all layers, 0 = no layers
     n_ctx: int = 4096
 
 class UnloadModelRequest(BaseModel):
-    model_name: str = Field(..., example="council") # The nickname of the model to unload
+    model_name: str = Field(..., json_schema_extra={'example': 'council'}) # The nickname of the model to unload
 
 class GenerateRequest(BaseModel):
-    model_name: str = Field(..., example="council") # This must match a name you've already loaded
-    prompt: str = Field(..., example="USER: Hello, what is your status?\nASSISTANT:")
+    model_name: str = Field(..., json_schema_extra={'example': 'council'}) # This must match a name you've already loaded
+    prompt: str = Field(..., json_schema_extra={'example': 'USER: Hello, what is your status?\nASSISTANT:'})
     max_tokens: int = 512
     temperature: float = 0.7
     stream: bool = True # Controls whether to stream the response
 
 class MemoryAddRequest(BaseModel):
-    text: str = Field(..., example="Dev Orch is an AI-driven system to write software.")
-    doc_id: str = Field(..., example="doc_id_001") # A unique ID for this text chunk
+    text: str = Field(..., json_schema_extra={'example': 'Dev Orch is an AI-driven system to write software.'})
+    doc_id: str = Field(..., json_schema_extra={'example': 'doc_id_001'}) # A unique ID for this text chunk
 
 class MemoryQueryRequest(BaseModel):
-    query: str = Field(..., example="What is Dev Orch?")
+    query: str = Field(..., json_schema_extra={'example': 'What is Dev Orch?'})
     top_k: int = 3
 
 class FoundDocument(BaseModel):
@@ -154,7 +154,7 @@ class MemoryQueryResponse(BaseModel):
     found_documents: List[FoundDocument]
 
 class AdminExecRequest(BaseModel):
-    command: str = Field(..., example="ls -l") # The shell command to execute
+    command: str = Field(..., json_schema_extra={'example': 'ls -l'}) # The shell command to execute
 
 class AdminExecResponse(BaseModel):
     stdout: str
@@ -780,8 +780,11 @@ async def run_smoke_test_endpoint():
     """
     # Find a model to use for the test
     try:
-        # Get the first model filename from the Enum
-        default_model_file = next(iter(ModelFileEnum.__members__)).value
+        # --- BUG FIX V3.3 ---
+        # Get the first model filename (key) from the Enum members
+        default_model_file = next(iter(ModelFileEnum.__members__))
+        # --- END BUG FIX ---
+        
         if "NO_MODELS_FOUND" in default_model_file or "ERROR" in default_model_file:
             raise HTTPException(status_code=500, detail="Smoke test failed: No .gguf models found in model directory.")
     except Exception as e:
