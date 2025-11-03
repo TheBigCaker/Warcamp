@@ -11,3 +11,6 @@ __pycache__/
 # Models - Do not commit GGUF files
 *.gguf
 *.bin
+
+# Environment
+.env

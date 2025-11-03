@@ -6,10 +6,15 @@ import os
 import sys
 import logging
 from llama_cpp import Llama
+from dotenv import load_dotenv
 
 # -----------------------------------------------------------------
-# Logging Setup
+# Environment & Logging Setup
 # -----------------------------------------------------------------
+
+# Load environment variables from .env file (for VS Code/Visual Studio debugging)
+load_dotenv() 
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -24,10 +29,11 @@ log = logging.getLogger(__name__)
 # Warcamp API Initializing
 # -----------------------------------------------------------------
 
-# Read the Model Directory from the environment variable set by the PowerShell script
+# Read the Model Directory from the environment variable
 MODELS_ROOT = os.environ.get("WARCAMP_MODELS_ROOT")
 if not MODELS_ROOT:
     log.error("FATAL ERROR: WARCAMP_MODELS_ROOT environment variable not set.")
+    log.error("Ensure it is set in your .env file or system environment.")
     sys.exit(1)
 
 log.info(f"Warcamp 🏕️ initializing... Model Root: {MODELS_ROOT}")
