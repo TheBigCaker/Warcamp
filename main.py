@@ -1,5 +1,5 @@
 import uvicorn
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, BackgroundTasks
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, BackgroundTasks, APIRouter
 from fastapi.responses import StreamingResponse, HTMLResponse, FileResponse
 from pydantic import BaseModel, Field
 import subprocess
@@ -589,14 +589,15 @@ async def admin_exec(request: AdminExecRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 # -----------------------------------------------------------------
-# --- NEW: Live Chat WebSocket (V4.1) ---
-# --- BUG FIX V4.5: Removed 'tags' from websocket to fix TypeError ---
+# --- NEW: Live Chat WebSocket (V4.6) ---
+# --- Refactored to APIRouter to make it visible in docs ---
 # -----------------------------------------------------------------
-@app.websocket("/ws/council-chat")
+chat_router = APIRouter(tags=["Live Chat"])
+
+@chat_router.websocket("/ws/council-chat")
 async def websocket_council_chat(websocket: WebSocket):
     """
     Handles a live, streaming chat session with the 'council' model.
-    Will appear under 'default' in API docs.
     """
     await websocket.accept()
     log.info("WebSocket connection established for Council chat.")
@@ -1030,6 +1031,9 @@ async def run_smoke_test_endpoint():
 # -----------------------------------------------------------------
 # --- Main Entry Point ---
 # -----------------------------------------------------------------
+
+# --- V4.6: Add the chat router to the main app ---
+app.include_router(chat_router)
 
 if __name__ == "__main__":
     """
