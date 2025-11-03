@@ -4,3 +4,5 @@ llama-cpp-python
 pydantic
 python-dotenv
 faiss-cpu
+setuptools
+wheel

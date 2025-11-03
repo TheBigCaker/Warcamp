@@ -81,7 +81,8 @@ ModelFileEnum = _get_model_file_enum()
 embedding_model_instance = None
 faiss_index = None
 document_store = []
-EMBEDDING_DIM = 256 # Specific to embeddinggemma-300M
+# Dimension corrected in V2.7 from 256 to 768 based on model metadata
+EMBEDDING_DIM = 768 # Specific to embeddinggemma-300M
 
 try:
     EMBEDDING_MODEL_FILENAME = os.environ.get("WARCAMP_EMBEDDING_MODEL_FILENAME")
