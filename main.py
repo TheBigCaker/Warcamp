@@ -119,7 +119,7 @@ except Exception as e:
 app = FastAPI(
     title="Warcamp 🏕️ - Dev Orch Backend",
     description="API for orchestrating local LLM agents (Gemma, CodeGemma) via llama-cpp-python.",
-    version="0.2.0" # <-- Version Bump
+    version="0.3.0" # <-- Version Bump
 )
 
 # -----------------------------------------------------------------
@@ -166,7 +166,7 @@ class AdminExecResponse(BaseModel):
     stderr: str
     return_code: int
 
-# --- NEW: Orchestration Models ---
+# --- Orchestration Models ---
 class MissionRequest(BaseModel):
     prompt: str = Field(..., json_schema_extra={'example': 'Build me a python script that acts as a simple calculator.'})
     council_model: str = Field("council", json_schema_extra={'example': 'council'})
@@ -188,7 +188,7 @@ class MissionStatus(BaseModel):
 # e.g., {"council": <Llama object>}
 loaded_models: Dict[str, Llama] = {}
 
-# --- NEW: Mission Tracking ---
+# --- Mission Tracking ---
 # This will store the status of long-running missions
 # e.g., {"mission-uuid-123": ["Step 1: Loading Advisor..."]}
 mission_logs: Dict[str, List[str]] = {}
@@ -589,7 +589,7 @@ async def admin_exec(request: AdminExecRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 # -----------------------------------------------------------------
-# --- NEW: Live Chat WebSocket (V3.7) ---
+# --- NEW: Live Chat WebSocket (V4.1) ---
 # -----------------------------------------------------------------
 @app.websocket("/ws/council-chat")
 async def websocket_council_chat(websocket: WebSocket):
@@ -602,7 +602,7 @@ async def websocket_council_chat(websocket: WebSocket):
     # Check if 'council' model is loaded
     if "council" not in loaded_models:
         log.warning("Council chat requested, but 'council' model is not loaded.")
-        await websocket.send_json({"error": "The 'council' model is not loaded."})
+        await websocket.send_json({"error": "The 'council' model is not loaded. Please load it via the API first."})
         await websocket.close()
         return
 
@@ -649,7 +649,7 @@ async def websocket_council_chat(websocket: WebSocket):
 
 
 # -----------------------------------------------------------------
-# --- NEW: Agent Orchestration (V3.7) ---
+# --- Agent Orchestration (V3.7) ---
 # -----------------------------------------------------------------
 
 async def _log_mission(mission_id: str, message: str):
@@ -683,7 +683,6 @@ async def _run_mission_logic(mission_id: str, chief_prompt: str, req: MissionReq
             # === STEP 2: Generate Plan ===
             await _log_mission(mission_id, "Advisor loaded. Generating plan...")
             plan_prompt = f"USER: You are the Advisor. The Chief's request is: '{chief_prompt}'. Create a detailed plan, including file structure and logic, as Plans.md.\nASSISTANT:\n`markdown\n# Plans.md\n"
-            # --- BUG FIX V3.8: Added missing 'temperature' ---
             gen_payload = {"model_name": advisor_name, "prompt": plan_prompt, "max_tokens": 2048, "stream": False, "temperature": 0.7}
             async with session.post(f"{BASE_URL}/api/v1/generate", json=gen_payload) as r:
                 if not r.ok:
@@ -711,7 +710,6 @@ async def _run_mission_logic(mission_id: str, chief_prompt: str, req: MissionReq
             # === STEP 5: Generate Tasks ===
             await _log_mission(mission_id, "Sarge loaded. Generating tasks from plan...")
             task_prompt = f"USER: You are Sarge. Read this plan:\n{plan_text}\n\nCreate a detailed, step-by-step Tasklist.md for the Orchs.\nASSISTANT:\n`markdown\n# Tasklist.md\n"
-            # --- BUG FIX V3.8: Added missing 'temperature' ---
             gen_payload = {"model_name": sarge_name, "prompt": task_prompt, "max_tokens": 2048, "stream": False, "temperature": 0.7}
             async with session.post(f"{BASE_URL}/api/v1/generate", json=gen_payload) as r:
                 if not r.ok:
