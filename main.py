@@ -1,10 +1,13 @@
 import uvicorn
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import subprocess
 import os
 import sys
 import logging
+import json
+from typing import Iterator
 from llama_cpp import Llama
 from dotenv import load_dotenv
 
@@ -61,6 +64,7 @@ class GenerateRequest(BaseModel):
     prompt: str
     max_tokens: int = 512
     temperature: float = 0.7
+    stream: bool = True # Controls whether to stream the response
 
 class MemoryQueryRequest(BaseModel):
     query: str
@@ -155,21 +159,79 @@ async def list_models():
 
 # --- Inference ---
 
+async def stream_generator(model_name: str, prompt: str, max_tokens: int, temperature: float) -> Iterator[str]:
+    """
+    Generator function to yield streaming completion chunks.
+    This allows us to send the response token by token.
+    """
+    log.info(f"Starting generation stream for '{model_name}'...")
+    try:
+        model = loaded_models.get(model_name)
+        if not model:
+            log.error(f"Model '{model_name}' not found in stream_generator.")
+            yield f"data: {json.dumps({'error': f'Model {model_name} not found.'})}\n\n"
+            return
+
+        # Create the completion stream
+        stream = model.create_completion(
+            prompt=prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            stream=True
+        )
+        
+        # Yield each chunk as a Server-Sent Event (SSE)
+        for output in stream:
+            chunk = output.get('choices', [{}])[0].get('text', '')
+            if chunk:
+                # Format as Server-Sent Event (SSE)
+                # This 'data: ... \n\n' format is crucial
+                yield f"data: {json.dumps({'token': chunk})}\n\n"
+        
+        log.info(f"Generation stream for '{model_name}' complete.")
+        yield f"data: {json.dumps({'status': 'done'})}\n\n"
+
+    except Exception as e:
+        log.error(f"Error during generation stream for '{model_name}': {e}")
+        yield f"data: {json.dumps({'error': str(e)})}\n\n"
+
 @app.post("/api/v1/generate", tags=["Inference"])
 async def generate_completion(request: GenerateRequest):
     """
     Run inference on a pre-loaded model.
     """
     if request.model_name not in loaded_models:
+        log.error(f"Generate request for '{request.model_name}', but it's not loaded.")
         raise HTTPException(status_code=404, detail=f"Model '{request.model_name}' not found.")
 
-    # TODO: Get model from 'loaded_models'
     model = loaded_models[request.model_name]
     
-    # TODO: Run model.create_completion(prompt=...)
-    
-    # Placeholder response
-    return {"message": f"TODO: Run generation on '{request.model_name}' with prompt: '{request.prompt[:50]}...'"}
+    if request.stream:
+        # Use the streaming generator
+        return StreamingResponse(
+            stream_generator(
+                model_name=request.model_name,
+                prompt=request.prompt,
+                max_tokens=request.max_tokens,
+                temperature=request.temperature
+            ),
+            media_type="text/event-stream"
+        )
+    else:
+        # Perform a blocking, non-streaming completion
+        log.info(f"Starting non-streaming generation for '{request.model_name}'...")
+        try:
+            output = model.create_completion(
+                prompt=request.prompt,
+                max_tokens=request.max_tokens,
+                temperature=request.temperature,
+                stream=False
+            )
+            log.info(f"Non-streaming generation for '{request.model_name}' complete.")
+            return output
+        except Exception as e:
+            log.error(f"Error during non-streaming generation for '{request.model_name}': {e}")
+            raise HTTPException(status_code=500, detail=str(e))
 
 # --- RAG/Memory ---
 

@@ -14,3 +14,6 @@ __pycache__/
 
 # Environment
 .env
+
+# Local Helper Scripts
+run_warcamp.ps1
