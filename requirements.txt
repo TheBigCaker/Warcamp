@@ -1,4 +1,5 @@
-ollama
-chromadb
+fastapi
+uvicorn[standard]
+llama-cpp-python
 pydantic
-outlines
+# TODO: Add vector DB (e.g., faiss-cpu)
