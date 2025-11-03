@@ -1,21 +1,28 @@
 import uvicorn
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, HTMLResponse, FileResponse
 from pydantic import BaseModel, Field
 import subprocess
 import os
 import sys
 import logging
 import json
-from typing import Iterator
+from typing import Iterator, List, Dict, Any
 from enum import Enum
 from llama_cpp import Llama
 from dotenv import load_dotenv
+import datetime
+import aiohttp
 
 # --- RAG Imports ---
 import numpy as np
 import faiss
 from sentence_transformers import SentenceTransformer
+
+# --- PDF Report Imports ---
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.units import inch
 
 # -----------------------------------------------------------------
 # Environment & Logging Setup
@@ -137,6 +144,15 @@ class MemoryQueryRequest(BaseModel):
     query: str = Field(..., example="What is Dev Orch?")
     top_k: int = 3
 
+class FoundDocument(BaseModel):
+    doc_id: str
+    text: str
+    score: float # L2 distance (lower is better)
+
+class MemoryQueryResponse(BaseModel):
+    query: str
+    found_documents: List[FoundDocument]
+
 class AdminExecRequest(BaseModel):
     command: str = Field(..., example="ls -l") # The shell command to execute
 
@@ -156,8 +172,133 @@ loaded_models = {}
 # API Endpoints
 # -----------------------------------------------------------------
 
-@app.get("/", tags=["Status"])
-async def get_root():
+@app.get("/", tags=["Dashboard"], response_class=HTMLResponse)
+async def get_dashboard():
+    """
+    Serves the main HTML dashboard for the Warcamp.
+    """
+    html_content = """
+    <html>
+        <head>
+            <title>Warcamp 🏕️ Dashboard</title>
+            <style>
+                body { 
+                    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+                    background-color: #1a1a1a; 
+                    color: #e0e0e0;
+                    display: flex;
+                    justify-content: center;
+                    align-items: center;
+                    height: 100vh;
+                    margin: 0;
+                    flex-direction: column;
+                }
+                h1 { 
+                    color: #4CAF50; /* Ork Green */
+                    font-weight: 600;
+                    font-size: 2.5em;
+                }
+                #testButton {
+                    background-color: #4CAF50;
+                    color: #1a1a1a;
+                    border: none;
+                    padding: 20px 40px;
+                    font-size: 1.2em;
+                    font-weight: bold;
+                    border-radius: 8px;
+                    cursor: pointer;
+                    transition: background-color 0.3s, transform 0.1s;
+                }
+                #testButton:hover {
+                    background-color: #66BB6A;
+                }
+                #testButton:active {
+                    transform: scale(0.98);
+                }
+                #testButton:disabled {
+                    background-color: #555;
+                    color: #888;
+                    cursor: not-allowed;
+                }
+                #status {
+                    margin-top: 20px;
+                    font-size: 1.1em;
+                    color: #aaa;
+                    min-height: 1.5em;
+                }
+                .links {
+                    margin-top: 40px;
+                }
+                .links a {
+                    color: #4CAF50;
+                    text-decoration: none;
+                    margin: 0 10px;
+                    font-size: 1.1em;
+                }
+                .links a:hover {
+                    text-decoration: underline;
+                }
+            </style>
+        </head>
+        <body>
+            <h1>Warcamp 🏕️ Dashboard</h1>
+            <button id="testButton" onclick="runTest()">Run Warcamp Smoke Test</button>
+            <div id="status">Ready, Chief! "Work work!"</div>
+            <div class="links">
+                <a href="/docs" target="_blank">API Docs (Swagger)</a>
+                <a href="/redoc" target="_blank">API ReDoc</a>
+            </div>
+
+            <script>
+                async function runTest() {
+                    const button = document.getElementById('testButton');
+                    const status = document.getElementById('status');
+                    
+                    button.disabled = true;
+                    status.innerText = 'Running smoke test... This may take a minute...';
+                    
+                    try {
+                        const response = await fetch('/api/v1/run-smoke-test');
+                        
+                        if (!response.ok) {
+                            throw new Error('Test failed. Server responded with: ' + response.status);
+                        }
+                        
+                        // Handle the PDF download
+                        const blob = await response.blob();
+                        const url = window.URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.style.display = 'none';
+                        a.href = url;
+                        a.download = 'DO-Test-Results.pdf';
+                        document.body.appendChild(a);
+                        a.click();
+                        window.URL.revokeObjectURL(url);
+                        document.body.removeChild(a);
+                        
+                        status.style.color = '#4CAF50';
+                        status.innerText = 'Test complete! Report "DO-Test-Results.pdf" downloaded.';
+                        
+                    } catch (error) {
+                        console.error('Smoke test failed:', error);
+                        status.style.color = '#F44336'; // Red
+                        status.innerText = 'Test failed! See server logs for details. ' + error.message;
+                    } finally {
+                        button.disabled = false;
+                        setTimeout(() => { 
+                            status.style.color = '#aaa';
+                            status.innerText = 'Ready, Chief! "Work work!"'; 
+                        }, 5000);
+                    }
+                }
+            </script>
+        </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
+
+@app.get("/api/v1/status", tags=["Status"])
+async def get_status():
     """Root endpoint to check if the Warcamp is online."""
     return {"message": "Warcamp is online. The Council is listening."}
 
@@ -348,20 +489,51 @@ async def add_to_memory(request: MemoryAddRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/v1/memory/query", tags=["RAG / Memory"])
+@app.post("/api/v1/memory/query", tags=["RAG / Memory"], response_model=MemoryQueryResponse)
 async def query_memory(request: MemoryQueryRequest):
     """
     Query the RAG vector store with a string.
     """
-    # TODO: Implement the query logic:
-    # 1. Create embedding for request.query using embedding_model_instance.encode()
-    # 2. Convert to NumPy array and reshape
-    # 3. Use faiss_index.search(embedding, k=request.top_k)
-    # 4. Get the indices (I) and distances (D) from the result
-    # 5. Loop through the indices (I[0])
-    # 6. Use each index i to look up the original text in document_store[i]
-    # 7. Return the found texts
-    return {"message": "TODO: Query vector store", "query": request.query}
+    try:
+        if faiss_index.ntotal == 0:
+            log.warning("Query received, but memory store is empty.")
+            return MemoryQueryResponse(query=request.query, found_documents=[])
+            
+        log.info(f"Querying memory with: '{request.query}'")
+        
+        # 1. Create embedding for the query
+        query_vector = embedding_model_instance.encode(request.query)
+        
+        # 2. Convert to NumPy array and reshape
+        query_np = np.array(query_vector).astype('float32').reshape(1, -1)
+        
+        if query_np.shape[1] != EMBEDDING_DIM:
+            log.error(f"Query embedding dimension mismatch!")
+            raise ValueError("Query embedding dimension mismatch.")
+
+        # 3. Use faiss_index.search
+        # D = distances (lower is better for L2), I = indices
+        distances, indices = faiss_index.search(query_np, k=request.top_k)
+        
+        # 4. Loop through results and look up in document_store
+        results = []
+        for i, index in enumerate(indices[0]):
+            if index < 0: # -1 means no result found
+                continue
+                
+            doc = document_store[index]
+            results.append(FoundDocument(
+                doc_id=doc["id"],
+                text=doc["text"],
+                score=float(distances[0][i]) # The L2 distance
+            ))
+            
+        log.info(f"Query returned {len(results)} documents.")
+        return MemoryQueryResponse(query=request.query, found_documents=results)
+        
+    except Exception as e:
+        log.error(f"Failed to query memory. Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # --- Admin Shell ---
 
@@ -390,7 +562,251 @@ async def admin_exec(request: AdminExecRequest):
         log.error(f"AdminExec failed. Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+# -----------------------------------------------------------------
+# --- NEW: Smoke Test & Report Generation ---
+# -----------------------------------------------------------------
+
+# --- Test Logic ---
+async def run_smoke_test_logic(base_url: str, model_filename: str) -> List[Dict[str, Any]]:
+    """
+    Runs the full 8-step smoke test logic internally using aiohttp.
+    Returns a list of result dictionaries.
+    """
+    log.info("--- Starting Internal Smoke Test ---")
+    results = []
+    MODEL_NAME = "smoke_test_model"
+    # Use the first available .gguf file if the default isn't found
+    if not os.path.exists(os.path.join(MODELS_ROOT, model_filename)):
+        log.warning(f"Smoke test model '{model_filename}' not found. Trying first available .gguf file...")
+        try:
+            model_filename = _get_model_file_enum().__members__.popitem()[0]
+        except Exception:
+            results.append({"step": "Setup", "success": False, "details": "No .gguf models found in model directory."})
+            return results
+    
+    log.info(f"Using model '{model_filename}' for smoke test.")
+
+    async with aiohttp.ClientSession() as session:
+        
+        # Step 1: Check Status
+        try:
+            async with session.get(f"{base_url}/api/v1/status") as r:
+                r.raise_for_status()
+                data = await r.json()
+                assert "Warcamp is online" in data.get("message", "")
+                results.append({"step": "1. GET /api/v1/status", "success": True, "details": "Server is online."})
+        except Exception as e:
+            results.append({"step": "1. GET /api/v1/status", "success": False, "details": str(e)})
+            return results # Stop test if server isn't on
+            
+        # Step 2: Load Model
+        try:
+            payload = {"model_name": MODEL_NAME, "model_filename": model_filename, "n_gpu_layers": -1, "n_ctx": 4096}
+            async with session.post(f"{base_url}/api/v1/models/load", json=payload) as r:
+                r.raise_for_status()
+                data = await r.json()
+                assert "loaded successfully" in data.get("message", "")
+                results.append({"step": "2. POST /models/load", "success": True, "details": f"Loaded '{model_filename}'."})
+        except Exception as e:
+            results.append({"step": "2. POST /models/load", "success": False, "details": str(e)})
+            return results # Stop test if model can't load
+
+        # Step 3: List Models
+        try:
+            async with session.get(f"{base_url}/api/v1/models/list") as r:
+                r.raise_for_status()
+                data = await r.json()
+                assert MODEL_NAME in data.get("loaded_models", [])
+                results.append({"step": "3. GET /models/list", "success": True, "details": f"Model '{MODEL_NAME}' confirmed in list."})
+        except Exception as e:
+            results.append({"step": "3. GET /models/list", "success": False, "details": str(e)})
+
+        # Step 4: Add to Memory
+        try:
+            payload = {"text": "The secret code is 'work work'.", "doc_id": "smoke_test_doc"}
+            async with session.post(f"{base_url}/api/v1/memory/add", json=payload) as r:
+                r.raise_for_status()
+                data = await r.json()
+                assert data.get("total_documents", 0) > 0
+                results.append({"step": "4. POST /memory/add", "success": True, "details": "Added 'smoke_test_doc'."})
+        except Exception as e:
+            results.append({"step": "4. POST /memory/add", "success": False, "details": str(e)})
+
+        # Step 5: Query Memory
+        try:
+            payload = {"query": "What is the secret code?", "top_k": 1}
+            async with session.post(f"{base_url}/api/v1/memory/query", json=payload) as r:
+                r.raise_for_status()
+                data = await r.json()
+                assert len(data.get("found_documents", [])) == 1
+                assert "work work" in data["found_documents"][0].get("text", "")
+                results.append({"step": "5. POST /memory/query", "success": True, "details": "RAG query successful."})
+        except Exception as e:
+            results.append({"step": "5. POST /memory/query", "success": False, "details": str(e)})
+
+        # Step 6: Generate Stream
+        try:
+            payload = {"model_name": MODEL_NAME, "prompt": "USER: Hello! Say 'test'.\nASSISTANT:", "max_tokens": 5, "stream": True}
+            full_response = ""
+            async with session.post(f"{base_url}/api/v1/generate", json=payload) as r:
+                r.raise_for_status()
+                async for line in r.content:
+                    if line:
+                        line_str = line.decode('utf-8')
+                        if line_str.startswith("data:"):
+                            data_str = line_str[5:]
+                            try:
+                                token_data = json.loads(data_str)
+                                if "token" in token_data:
+                                    full_response += token_data["token"]
+                            except json.JSONDecodeError:
+                                pass # Ignore status/non-json lines
+            assert "test" in full_response.lower()
+            results.append({"step": "6. POST /generate (Stream)", "success": True, "details": "Streamed response contained 'test'."})
+        except Exception as e:
+            results.append({"step": "6. POST /generate (Stream)", "success": False, "details": str(e)})
+
+        # Step 7: Admin Exec
+        try:
+            payload = {"command": "timeout 1"} # Safe, cross-platform-ish command
+            async with session.post(f"{base_url}/api/v1/admin/exec", json=payload) as r:
+                r.raise_for_status()
+                data = await r.json()
+                assert "stdout" in data
+                results.append({"step": "7. POST /admin/exec", "success": True, "details": "Shell command executed."})
+        except Exception as e:
+            results.append({"step": "7. POST /admin/exec", "success": False, "details": str(e)})
+
+        # Step 8: Unload Model
+        try:
+            payload = {"model_name": MODEL_NAME}
+            async with session.post(f"{base_url}/api/v1/models/unload", json=payload) as r:
+                r.raise_for_status()
+                data = await r.json()
+                assert "unloaded successfully" in data.get("message", "")
+                results.append({"step": "8. POST /models/unload", "success": True, "details": f"Model '{MODEL_NAME}' unloaded."})
+        except Exception as e:
+            results.append({"step": "8. POST /models/unload", "success": False, "details": str(e)})
+
+    log.info("--- Internal Smoke Test Finished ---")
+    return results
+
+# --- PDF Generation ---
+def generate_pdf_report(results: List[Dict[str, Any]], filename: str) -> None:
+    """
+    Generates a PDF report from the smoke test results.
+    """
+    log.info(f"Generating PDF report: {filename}")
+    c = canvas.Canvas(filename, pagesize=letter)
+    width, height = letter
+    
+    # Title
+    c.setFont("Helvetica-Bold", 18)
+    c.drawCentredString(width / 2.0, height - 1*inch, "Warcamp 🏕️ Smoke Test Report")
+    
+    # Timestamp
+    c.setFont("Helvetica", 10)
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    c.drawCentredString(width / 2.0, height - 1.25*inch, f"Generated: {now}")
+    
+    # Start drawing results
+    c.setFont("Helvetica-Bold", 12)
+    y_pos = height - 2*inch
+    c.drawString(1*inch, y_pos, "Test Step")
+    c.drawString(4*inch, y_pos, "Status")
+    c.line(1*inch, y_pos - 0.1*inch, width - 1*inch, y_pos - 0.1*inch)
+    
+    c.setFont("Helvetica", 10)
+    y_pos -= 0.25*inch
+    
+    total_passed = 0
+    for res in results:
+        step = res.get("step", "Unknown Step")
+        success = res.get("success", False)
+        details = res.get("details", "")
+        
+        # Set color
+        if success:
+            total_passed += 1
+            status = "[SUCCESS]"
+            c.setFillColorRGB(0, 0.5, 0) # Dark Green
+        else:
+            status = "[FAILURE]"
+            c.setFillColorRGB(0.8, 0, 0) # Dark Red
+            
+        c.drawString(1*inch, y_pos, step)
+        c.drawString(4*inch, y_pos, status)
+        
+        # Draw details if they exist (and for failures)
+        if not success and details:
+            c.setFillColorRGB(0.3, 0.3, 0.3) # Gray
+            c.setFont("Helvetica-Oblique", 9)
+            y_pos -= 0.2*inch
+            c.drawString(1.2*inch, y_pos, f"Details: {details[:100]}") # Truncate details
+            c.setFont("Helvetica", 10)
+        
+        c.setFillColorRGB(0, 0, 0) # Reset to black
+        y_pos -= 0.3*inch
+        
+        # Page break
+        if y_pos < 1*inch:
+            c.showPage()
+            c.setFont("Helvetica", 10)
+            y_pos = height - 1*inch
+
+    # Summary
+    y_pos -= 0.2*inch
+    c.line(1*inch, y_pos, width - 1*inch, y_pos)
+    y_pos -= 0.3*inch
+    
+    total = len(results)
+    if total_passed == total:
+        c.setFillColorRGB(0, 0.5, 0)
+        c.setFont("Helvetica-Bold", 14)
+        c.drawCentredString(width / 2.0, y_pos, f"ALL {total} TESTS PASSED")
+    else:
+        c.setFillColorRGB(0.8, 0, 0)
+        c.setFont("Helvetica-Bold", 14)
+        c.drawCentredString(width / 2.0, y_pos, f"FAILED: {total - total_passed} / {total} TESTS")
+
+    c.save()
+    log.info("PDF report saved.")
+
+# --- Test Endpoint ---
+@app.get("/api/v1/run-smoke-test", tags=["Dashboard"])
+async def run_smoke_test_endpoint():
+    """
+    Runs the internal smoke test and returns a PDF report.
+    """
+    # Find a model to use for the test
+    try:
+        # Get the first model filename from the Enum
+        default_model_file = next(iter(ModelFileEnum.__members__)).value
+        if "NO_MODELS_FOUND" in default_model_file or "ERROR" in default_model_file:
+            raise HTTPException(status_code=500, detail="Smoke test failed: No .gguf models found in model directory.")
+    except Exception as e:
+        log.error(f"Smoke test failed: Could not find a model to test with. {e}")
+        raise HTTPException(status_code=500, detail=f"Smoke test failed: No .gguf models found. {e}")
+
+    base_url = f"http://127.0.0.1:{APP_PORT}"
+    report_filename = "DO-Test-Results.pdf"
+    
+    try:
+        results = await run_smoke_test_logic(base_url, default_model_file)
+        generate_pdf_report(results, report_filename)
+        
+        return FileResponse(
+            report_filename,
+            media_type="application/pdf",
+            filename=report_filename
+        )
+    except Exception as e:
+        log.error(f"Failed to run smoke test or generate report: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# -----------------------------------------------------------------
 # --- Main Entry Point ---
+# -----------------------------------------------------------------
 
 if __name__ == "__main__":
     """

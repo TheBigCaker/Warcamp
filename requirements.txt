@@ -7,3 +7,6 @@ faiss-cpu
 setuptools
 wheel
 sentence-transformers
+requests
+reportlab
+aiohttp
