@@ -119,7 +119,7 @@ except Exception as e:
 app = FastAPI(
     title="Warcamp 🏕️ - Dev Orch Backend",
     description="API for orchestrating local LLM agents (Gemma, CodeGemma) via llama-cpp-python.",
-    version="0.3.0" # <-- Version Bump
+    version="0.4.0" # <-- Version Bump
 )
 
 # -----------------------------------------------------------------
@@ -203,122 +203,281 @@ async def get_dashboard():
     """
     Serves the main HTML dashboard for the Warcamp.
     """
+    # --- V4.9 GUI OVERHAUL: RAINBOW SPRINKLE DONUT THEME ---
     html_content = """
-    <html>
-        <head>
-            <title>Warcamp 🏕️ Dashboard</title>
-            <style>
-                body { 
-                    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-                    background-color: #1a1a1a; 
-                    color: #e0e0e0;
-                    display: flex;
-                    justify-content: center;
-                    align-items: center;
-                    height: 100vh;
-                    margin: 0;
-                    flex-direction: column;
-                }
-                h1 { 
-                    color: #4CAF50; /* Ork Green */
-                    font-weight: 600;
-                    font-size: 2.5em;
-                }
-                #testButton {
-                    background-color: #4CAF50;
-                    color: #1a1a1a;
-                    border: none;
-                    padding: 20px 40px;
-                    font-size: 1.2em;
-                    font-weight: bold;
-                    border-radius: 8px;
-                    cursor: pointer;
-                    transition: background-color 0.3s, transform 0.1s;
-                }
-                #testButton:hover {
-                    background-color: #66BB6A;
-                }
-                #testButton:active {
-                    transform: scale(0.98);
-                }
-                #testButton:disabled {
-                    background-color: #555;
-                    color: #888;
-                    cursor: not-allowed;
-                }
-                #status {
-                    margin-top: 20px;
-                    font-size: 1.1em;
-                    color: #aaa;
-                    min-height: 1.5em;
-                }
-                .links {
-                    margin-top: 40px;
-                }
-                .links a {
-                    color: #4CAF50;
-                    text-decoration: none;
-                    margin: 0 10px;
-                    font-size: 1.1em;
-                }
-                .links a:hover {
-                    text-decoration: underline;
-                }
-            </style>
-        </head>
-        <body>
-            <h1>Warcamp 🏕️ Dashboard</h1>
-            <button id="testButton" onclick="runTest()">Run Warcamp Smoke Test</button>
-            <div id="status">Ready, Chief! "Work work!"</div>
-            <div class="links">
-                <a href="/docs" target="_blank">API Docs (Swagger)</a>
-                <a href="/redoc" target="_blank">API ReDoc</a>
-            </div>
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Warcamp 🍩 Foundry</title>
+        <style>
+            :root {
+                --donut-pink: #FFC0CB;
+                --donut-frosting: #FFF;
+                --sprinkle-blue: #3498db;
+                --sprinkle-yellow: #f1c40f;
+                --sprinkle-green: #2ecc71;
+                --sprinkle-red: #e74c3c;
+                --text-color: #333;
+                --bg-color: #fdf2f5; /* Light pink background */
+                --border-color: #E0E0E0;
+            }
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+                background-color: var(--bg-color);
+                color: var(--text-color);
+                margin: 0;
+                padding: 0;
+                display: flex;
+                flex-direction: column;
+                height: 100vh;
+                overflow: hidden;
+            }
+            header {
+                background-color: var(--donut-frosting);
+                border-bottom: 2px solid var(--border-color);
+                padding: 10px 20px;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+            }
+            header h1 {
+                margin: 0;
+                color: var(--donut-pink);
+                font-size: 2em;
+            }
+            header .links {
+                margin-left: auto;
+                padding-right: 20px;
+            }
+            header .links a {
+                color: var(--sprinkle-blue);
+                text-decoration: none;
+                margin: 0 10px;
+                font-weight: 500;
+            }
+            header .links a:hover {
+                text-decoration: underline;
+            }
+            #smokeTestButton {
+                background-color: var(--sprinkle-green);
+                color: white;
+                border: none;
+                padding: 10px 20px;
+                font-size: 1em;
+                font-weight: bold;
+                border-radius: 8px;
+                cursor: pointer;
+                transition: background-color 0.3s;
+            }
+            #smokeTestButton:hover {
+                background-color: #27ae60;
+            }
+            #smokeTestButton:disabled {
+                background-color: #95a5a6;
+            }
+            
+            #main-content {
+                display: flex;
+                flex: 1;
+                overflow: hidden;
+            }
 
-            <script>
-                async function runTest() {
-                    const button = document.getElementById('testButton');
-                    const status = document.getElementById('status');
-                    
-                    button.disabled = true;
-                    status.innerText = 'Running smoke test... This may take a minute...';
-                    
-                    try {
-                        const response = await fetch('/api/v1/run-smoke-test');
-                        
-                        if (!response.ok) {
-                            throw new Error('Test failed. Server responded with: ' + response.status);
-                        }
-                        
-                        // Handle the PDF download
-                        const blob = await response.blob();
-                        const url = window.URL.createObjectURL(blob);
-                        const a = document.createElement('a');
-                        a.style.display = 'none';
-                        a.href = url;
-                        a.download = 'DO-Test-Results.pdf';
-                        document.body.appendChild(a);
-                        a.click();
-                        window.URL.revokeObjectURL(url);
-                        document.body.removeChild(a);
-                        
-                        status.style.color = '#4CAF50';
-                        status.innerText = 'Test complete! Report "DO-Test-Results.pdf" downloaded.';
-                        
-                    } catch (error) {
-                        console.error('Smoke test failed:', error);
-                        status.style.color = '#F44336'; // Red
-                        status.innerText = 'Test failed! See server logs for details. ' + error.message;
-                    } finally {
-                        button.disabled = false;
-                        setTimeout(() => { 
-                            status.style.color = '#aaa';
-                            status.innerText = 'Ready, Chief! "Work work!"'; 
-                        }, 5000);
+            #chat-container {
+                flex: 1;
+                display: flex;
+                flex-direction: column;
+                background-color: var(--donut-frosting);
+                border-right: 2px solid var(--border-color);
+            }
+            #chat-messages {
+                flex: 1;
+                padding: 20px;
+                overflow-y: auto;
+                border-bottom: 2px solid var(--border-color);
+            }
+            .message {
+                margin-bottom: 15px;
+                padding: 10px 15px;
+                border-radius: 12px;
+                max-width: 80%;
+                line-height: 1.5;
+            }
+            .message.user {
+                background-color: var(--sprinkle-blue);
+                color: white;
+                align-self: flex-end;
+                margin-left: auto;
+            }
+            .message.council {
+                background-color: #f1f1f1;
+                color: var(--text-color);
+                align-self: flex-start;
+                margin-right: auto;
+            }
+            .message.system {
+                background-color: var(--sprinkle-yellow);
+                color: var(--text-color);
+                text-align: center;
+                max-width: 100%;
+                font-weight: 500;
+            }
+            .message.error {
+                background-color: var(--sprinkle-red);
+                color: white;
+                font-weight: 500;
+            }
+
+            #chat-input-box {
+                display: flex;
+                padding: 20px;
+            }
+            #chat-input {
+                flex: 1;
+                border: 2px solid var(--border-color);
+                border-radius: 8px;
+                padding: 12px;
+                font-size: 1.1em;
+            }
+            #chat-input:focus {
+                outline: none;
+                border-color: var(--donut-pink);
+            }
+
+        </style>
+    </head>
+    <body>
+        <header>
+            <h1>Warcamp 🍩 Foundry</h1>
+            <div class="links">
+                <a href="/docs" target="_blank">API Docs</a>
+                <a href="/redoc" target="_blank">ReDoc</a>
+            </div>
+            <button id="smokeTestButton" onclick="runSmokeTest()">Run Smoke Test</button>
+        </header>
+        
+        <div id="main-content">
+            <div id="chat-container">
+                <div id="chat-messages">
+                    <div class="message system">Connecting to Council...</div>
+                </div>
+                <div id="chat-input-box">
+                    <input type="text" id="chat-input" placeholder="Message the Council...">
+                </div>
+            </div>
+        </div>
+
+        <script>
+            const ws = new WebSocket(ws:///ws/council-chat);
+            const messages = document.getElementById('chat-messages');
+            const input = document.getElementById('chat-input');
+            const smokeTestButton = document.getElementById('smokeTestButton');
+            let currentCouncilMessage = null;
+
+            function addMessage(text, sender) {
+                const msgDiv = document.createElement('div');
+                msgDiv.className = message ;
+                msgDiv.innerText = text;
+                messages.appendChild(msgDiv);
+                messages.scrollTop = messages.scrollHeight;
+                return msgDiv;
+            }
+
+            function appendToMessage(messageDiv, text) {
+                messageDiv.innerText += text;
+                messages.scrollTop = messages.scrollHeight;
+            }
+
+            ws.onopen = () => {
+                addMessage('Connected to Council! Ready for orders, Chief.', 'system');
+            };
+
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+
+                if (data.error) {
+                    addMessage(Error: , 'error');
+                } else if (data.status === 'done') {
+                    currentCouncilMessage = null;
+                } else if (data.token) {
+                    if (currentCouncilMessage) {
+                        appendToMessage(currentCouncilMessage, data.token);
+                    } else {
+                        currentCouncilMessage = addMessage(data.token, 'council');
                     }
                 }
-            </script>
-        </body>
+            };
+
+            ws.onclose = () => {
+                addMessage('Connection to Council lost. Try reloading the page.', 'error');
+            };
+
+            ws.onerror = (error) => {
+                console.error('WebSocket Error:', error);
+                addMessage('A connection error occurred. Check the server logs and try reloading.', 'error');
+            };
+
+            input.onkeydown = (event) => {
+                if (event.key === 'Enter') {
+                    const messageText = input.value;
+                    if (!messageText) return;
+
+                    // Check for client-side commands
+                    if (messageText.toLowerCase().trim() === 'run smoke test') {
+                        addMessage('run smoke test', 'user');
+                        runSmokeTest();
+                        input.value = '';
+                        return;
+                    }
+
+                    // Send to WebSocket
+                    addMessage(messageText, 'user');
+                    ws.send(JSON.stringify({ "prompt": messageText }));
+                    input.value = '';
+                }
+            };
+            
+            // Link button to function
+            smokeTestButton.onclick = runSmokeTest;
+
+            async function runSmokeTest() {
+                smokeTestButton.disabled = true;
+                const statusMessage = addMessage('Running smoke test...', 'system');
+                
+                try {
+                    const response = await fetch('/api/v1/run-smoke-test');
+                    
+                    if (!response.ok) {
+                        throw new Error('Test failed. Server responded with: ' + response.status);
+                    }
+                    
+                    // Handle PDF download
+                    const blob = await response.blob();
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.style.display = 'none';
+                    a.href = url;
+                    a.download = 'DO-Test-Results.pdf';
+                    document.body.appendChild(a);
+                    a.click();
+                    window.URL.revokeObjectURL(url);
+                    document.body.removeChild(a);
+                    
+                    statusMessage.innerText = 'Smoke Test Complete! Report "DO-Test-Results.pdf" downloaded.';
+                    statusMessage.className = 'message system'; // Green-like
+                
+                } catch (error) {
+                    console.error('Smoke test failed:', error);
+                    statusMessage.innerText = 'Smoke Test Failed! ' + error.message;
+                    statusMessage.className = 'message error';
+                } finally {
+                    smokeTestButton.disabled = false;
+                }
+            }
+        </script>
+    </body>
     </html>
     """
     return HTMLResponse(content=html_content)
