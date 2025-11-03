@@ -590,12 +590,13 @@ async def admin_exec(request: AdminExecRequest):
 
 # -----------------------------------------------------------------
 # --- NEW: Live Chat WebSocket (V4.1) ---
-# --- BUG FIX V4.2: Added 'tags' to make it visible ---
+# --- BUG FIX V4.5: Removed 'tags' from websocket to fix TypeError ---
 # -----------------------------------------------------------------
-@app.websocket("/ws/council-chat", tags=["Live Chat"])
+@app.websocket("/ws/council-chat")
 async def websocket_council_chat(websocket: WebSocket):
     """
     Handles a live, streaming chat session with the 'council' model.
+    Will appear under 'default' in API docs.
     """
     await websocket.accept()
     log.info("WebSocket connection established for Council chat.")
