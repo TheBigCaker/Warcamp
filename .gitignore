@@ -17,3 +17,6 @@ __pycache__/
 
 # Local Helper Scripts
 run_warcamp.ps1
+
+# Sentence-transformers cache
+.cache/

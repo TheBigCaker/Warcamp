@@ -6,3 +6,4 @@ python-dotenv
 faiss-cpu
 setuptools
 wheel
+sentence-transformers

@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 # --- RAG Imports ---
 import numpy as np
 import faiss
+from sentence_transformers import SentenceTransformer
 
 # -----------------------------------------------------------------
 # Environment & Logging Setup
@@ -77,36 +78,18 @@ ModelFileEnum = _get_model_file_enum()
 
 
 # --- RAG System Initialization ---
-# This system is now based on a GGUF embedding model
+# This system is now based on sentence-transformers (a pure-python library)
 embedding_model_instance = None
 faiss_index = None
 document_store = []
-# Dimension corrected in V2.7 from 256 to 768 based on model metadata
-EMBEDDING_DIM = 768 # Specific to embeddinggemma-300M
+# *** PIVOT V2.9: Using 'all-MiniLM-L6-v2', which has a dimension of 384 ***
+EMBEDDING_DIM = 384
 
 try:
-    EMBEDDING_MODEL_FILENAME = os.environ.get("WARCAMP_EMBEDDING_MODEL_FILENAME")
-    if not EMBEDDING_MODEL_FILENAME:
-        log.error("FATAL ERROR: WARCAMP_EMBEDDING_MODEL_FILENAME not set in .env")
-        raise ValueError("Embedding model filename not specified.")
-        
-    embedding_model_path = os.path.join(MODELS_ROOT, EMBEDDING_MODEL_FILENAME)
-    if not os.path.exists(embedding_model_path):
-        log.error(f"FATAL ERROR: Embedding model file not found at: {embedding_model_path}")
-        raise FileNotFoundError(f"Missing embedding model: {EMBEDDING_MODEL_FILENAME}")
-
-    log.info(f"Loading RAG embedding model from: {embedding_model_path}...")
-    
-    # Load the GGUF model in embedding mode
-    embedding_model_instance = Llama(
-        model_path=embedding_model_path,
-        embedding=True,
-        n_ctx=512, # Context for embeddings can be smaller
-        n_gpu_layers=-1, # Offload embedding model fully to GPU
-        verbose=True
-    )
-    
-    log.info(f"Embedding model '{EMBEDDING_MODEL_FILENAME}' loaded successfully.")
+    log.info(f"Loading RAG embedding model 'all-MiniLM-L6-v2'...")
+    # This will download the model (once) into a .cache folder
+    embedding_model_instance = SentenceTransformer('all-MiniLM-L6-v2')
+    log.info(f"Embedding model 'all-MiniLM-L6-v2' loaded successfully.")
 
     # Create a FAISS index (Flat, L2 distance)
     # This index lives in RAM
@@ -197,11 +180,6 @@ async def load_model(request: LoadModelRequest):
         log.error(f"Model file not found at path: {model_path}")
         raise HTTPException(status_code=404, detail=f"Model file not found: {model_filename_str}")
     
-    # Check that we are not trying to load the embedding model as a chat model
-    if model_filename_str == EMBEDDING_MODEL_FILENAME:
-        log.warning(f"Preventing load: '{model_filename_str}' is the active embedding model.")
-        raise HTTPException(status_code=400, detail="Cannot load the active embedding model as a chat model.")
-
     log.info(f"Loading model '{request.model_name}' from '{model_path}'...")
     log.info(f"  n_gpu_layers: {request.n_gpu_layers}, n_ctx: {request.n_ctx}")
 
@@ -211,7 +189,6 @@ async def load_model(request: LoadModelRequest):
             n_gpu_layers=request.n_gpu_layers,
             n_ctx=request.n_ctx,
             verbose=True
-            # Note: embedding=False is the default
         )
         loaded_models[request.model_name] = model
         log.info(f"SUCCESS: Model '{request.model_name}' is loaded and online.")
@@ -335,11 +312,11 @@ async def add_to_memory(request: MemoryAddRequest):
     try:
         log.info(f"Adding to memory, doc_id: {request.doc_id}")
         
-        # 1. Create embedding for the text using our GGUF model
-        vector_list = embedding_model_instance.embed(request.text)
+        # 1. Create embedding for the text using sentence-transformers
+        vector = embedding_model_instance.encode(request.text)
         
         # 2. Convert to NumPy array, ensure float32, and reshape for FAISS
-        vector_np = np.array(vector_list).astype('float32').reshape(1, -1)
+        vector_np = np.array(vector).astype('float32').reshape(1, -1)
         
         if vector_np.shape[1] != EMBEDDING_DIM:
             log.error(f"Embedding dimension mismatch! Model returned {vector_np.shape[1]} but index requires {EMBEDDING_DIM}.")
@@ -377,7 +354,7 @@ async def query_memory(request: MemoryQueryRequest):
     Query the RAG vector store with a string.
     """
     # TODO: Implement the query logic:
-    # 1. Create embedding for request.query using embedding_model_instance.embed()
+    # 1. Create embedding for request.query using embedding_model_instance.encode()
     # 2. Convert to NumPy array and reshape
     # 3. Use faiss_index.search(embedding, k=request.top_k)
     # 4. Get the indices (I) and distances (D) from the result
