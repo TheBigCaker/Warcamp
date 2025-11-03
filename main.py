@@ -15,7 +15,7 @@ import datetime
 import aiohttp
 import asyncio
 import uuid
-import platform  # <-- NEW: Import platform
+import platform
 
 # --- RAG Imports ---
 import numpy as np
@@ -786,14 +786,6 @@ async def run_smoke_test_logic(base_url: str, model_filename: str) -> List[Dict[
     log.info("--- Starting Internal Smoke Test ---")
     results = []
     MODEL_NAME = "smoke_test_model"
-    # Use the first available .gguf file if the default isn't found
-    if not os.path.exists(os.path.join(MODELS_ROOT, model_filename)):
-        log.warning(f"Smoke test model '{model_filename}' not found. Trying first available .gguf file...")
-        try:
-            model_filename = _get_model_file_enum().__members__.popitem()[0]
-        except Exception:
-            results.append({"step": "Setup", "success": False, "details": "No .gguf models found in model directory."})
-            return results
     
     log.info(f"Using model '{model_filename}' for smoke test.")
 
@@ -995,24 +987,34 @@ async def run_smoke_test_endpoint():
     """
     Runs the internal smoke test and returns a PDF report.
     """
-    # Find a model to use for the test
+    # --- BUG FIX V4.0: Intelligently find a 'gemma' model for the test ---
     try:
-        # --- BUG FIX V3.3 ---
-        # Get the first model filename (key) from the Enum members
-        default_model_file = next(iter(ModelFileEnum.__members__))
-        # --- END BUG FIX ---
+        all_models = list(ModelFileEnum.__members__.keys())
+        if not all_models:
+            raise Exception("No models found in Enum.")
+
+        # Prioritize 'gemma' models for the test
+        model_to_use = next((m for m in all_models if "gemma" in m.lower()), None)
         
-        if "NO_MODELS_FOUND" in default_model_file or "ERROR" in default_model_file:
-            raise HTTPException(status_code=500, detail="Smoke test failed: No .gguf models found in model directory.")
+        if model_to_use is None:
+            # Fallback: use the first valid model
+            model_to_use = next((m for m in all_models if "NO_MODELS" not in m and "ERROR" not in m), None)
+
+        if model_to_use is None:
+            raise Exception("No valid .gguf models found in model directory.")
+            
+        log.info(f"Smoke test will use model: {model_to_use}")
+        
     except Exception as e:
         log.error(f"Smoke test failed: Could not find a model to test with. {e}")
         raise HTTPException(status_code=500, detail=f"Smoke test failed: No .gguf models found. {e}")
+    # --- END BUG FIX V4.0 ---
 
     base_url = f"http://127.0.0.1:{APP_PORT}"
     report_filename = "DO-Test-Results.pdf"
     
     try:
-        results = await run_smoke_test_logic(base_url, default_model_file)
+        results = await run_smoke_test_logic(base_url, model_to_use) # Pass the chosen model
         generate_pdf_report(results, report_filename)
         
         return FileResponse(
