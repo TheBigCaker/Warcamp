@@ -15,6 +15,7 @@ import datetime
 import aiohttp
 import asyncio
 import uuid
+import platform  # <-- NEW: Import platform
 
 # --- RAG Imports ---
 import numpy as np
@@ -459,7 +460,7 @@ async def generate_completion(request: GenerateRequest):
             output = model.create_completion(
                 prompt=request.prompt,
                 max_tokens=request.max_tokens,
-                temperature=temperature,
+                temperature=request.temperature,
                 stream=False
             )
             log.info(f"Non-streaming generation for '{request.model_name}' complete.")
@@ -640,7 +641,10 @@ async def websocket_council_chat(websocket: WebSocket):
         log.info("WebSocket connection closed.")
     except Exception as e:
         log.error(f"Error in WebSocket chat: {e}")
-        await websocket.send_json({"error": str(e)})
+        try:
+            await websocket.send_json({"error": str(e)})
+        except:
+            pass # Connection might be closed
         await websocket.close()
 
 
@@ -679,7 +683,8 @@ async def _run_mission_logic(mission_id: str, chief_prompt: str, req: MissionReq
             # === STEP 2: Generate Plan ===
             await _log_mission(mission_id, "Advisor loaded. Generating plan...")
             plan_prompt = f"USER: You are the Advisor. The Chief's request is: '{chief_prompt}'. Create a detailed plan, including file structure and logic, as Plans.md.\nASSISTANT:\n`markdown\n# Plans.md\n"
-            gen_payload = {"model_name": advisor_name, "prompt": plan_prompt, "max_tokens": 2048, "stream": False}
+            # --- BUG FIX V3.8: Added missing 'temperature' ---
+            gen_payload = {"model_name": advisor_name, "prompt": plan_prompt, "max_tokens": 2048, "stream": False, "temperature": 0.7}
             async with session.post(f"{BASE_URL}/api/v1/generate", json=gen_payload) as r:
                 if not r.ok:
                     raise Exception(f"Advisor failed to generate plan: {await r.text()}")
@@ -706,7 +711,8 @@ async def _run_mission_logic(mission_id: str, chief_prompt: str, req: MissionReq
             # === STEP 5: Generate Tasks ===
             await _log_mission(mission_id, "Sarge loaded. Generating tasks from plan...")
             task_prompt = f"USER: You are Sarge. Read this plan:\n{plan_text}\n\nCreate a detailed, step-by-step Tasklist.md for the Orchs.\nASSISTANT:\n`markdown\n# Tasklist.md\n"
-            gen_payload = {"model_name": sarge_name, "prompt": task_prompt, "max_tokens": 2048, "stream": False}
+            # --- BUG FIX V3.8: Added missing 'temperature' ---
+            gen_payload = {"model_name": sarge_name, "prompt": task_prompt, "max_tokens": 2048, "stream": False, "temperature": 0.7}
             async with session.post(f"{BASE_URL}/api/v1/generate", json=gen_payload) as r:
                 if not r.ok:
                     raise Exception(f"Sarge failed to generate tasks: {await r.text()}")
@@ -871,21 +877,27 @@ async def run_smoke_test_logic(base_url: str, model_filename: str) -> List[Dict[
         except Exception as e:
             results.append({"step": "6. POST /generate (Stream)", "success": False, "details": str(e)})
 
+        # --- BUG FIX V3.9: Make Admin Exec OS-aware ---
         # Step 7: Admin Exec
         try:
-            payload = {"command": "timeout 1"} # Safe, cross-platform-ish command
+            os_name = platform.system().lower()
+            safe_command = "timeout 1" if os_name == "windows" else "sleep 1"
+            
+            payload = {"command": safe_command}
             async with session.post(f"{base_url}/api/v1/admin/exec", json=payload) as r:
                 r.raise_for_status()
                 data = await r.json()
                 assert "stdout" in data
-                results.append({"step": "7. POST /admin/exec", "success": True, "details": "Shell command executed."})
+                results.append({"step": "7. POST /admin/exec", "success": True, "details": f"Shell command '{safe_command}' executed."})
         except Exception as e:
             results.append({"step": "7. POST /admin/exec", "success": False, "details": str(e)})
+        # --- END BUG FIX ---
 
         # Step 8: Unload Model
         try:
             payload = {"model_name": MODEL_NAME}
-            async with session.post(f"{base_URL}/api/v1/models/unload", json=payload) as r:
+            # --- BUG FIX V3.8: Corrected variable name 'base_URL' to 'base_url' ---
+            async with session.post(f"{base_url}/api/v1/models/unload", json=payload) as r:
                 r.raise_for_status()
                 data = await r.json()
                 assert "unloaded successfully" in data.get("message", "")
