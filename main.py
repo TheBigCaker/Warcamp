@@ -36,6 +36,9 @@ if not MODELS_ROOT:
     log.error("Ensure it is set in your .env file or system environment.")
     sys.exit(1)
 
+# Read the Port from the environment variable, default to 8001
+APP_PORT = int(os.environ.get("WARCAMP_PORT", 8001))
+
 log.info(f"Warcamp 🏕️ initializing... Model Root: {MODELS_ROOT}")
 
 app = FastAPI(
@@ -215,5 +218,5 @@ if __name__ == "__main__":
     For production, you would use:
     'uvicorn main:app --host 0.0.0.0 --port 8000 --reload'
     """
-    log.info(f"Starting Uvicorn server in debug mode (reload=True)...")
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+    log.info(f"Starting Uvicorn server in debug mode (reload=True) on port {APP_PORT}...")
+    uvicorn.run("main:app", host="127.0.0.1", port=APP_PORT, reload=True)
