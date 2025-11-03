@@ -1,7 +1,7 @@
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import subprocess
 import os
 import sys
@@ -82,24 +82,27 @@ app = FastAPI(
 # Pydantic Models (Request/Response Bodies)
 # -----------------------------------------------------------------
 class LoadModelRequest(BaseModel):
-    model_name: str # e.g., "TheCouncil_Gemma1b" (This is the name you assign)
-    model_filename: ModelFileEnum # <-- This will now be a drop-down in /docs
+    model_name: str = Field(..., example="council") # The nickname you will use for this model
+    model_filename: ModelFileEnum # This will be a drop-down in /docs
     n_gpu_layers: int = -1 # -1 = all layers, 0 = no layers
     n_ctx: int = 4096
 
+class UnloadModelRequest(BaseModel):
+    model_name: str = Field(..., example="council") # The nickname of the model to unload
+
 class GenerateRequest(BaseModel):
-    model_name: str # This must match a name you've already loaded
-    prompt: str
+    model_name: str = Field(..., example="council") # This must match a name you've already loaded
+    prompt: str = Field(..., example="USER: Hello, what is your status?\nASSISTANT:")
     max_tokens: int = 512
     temperature: float = 0.7
     stream: bool = True # Controls whether to stream the response
 
 class MemoryQueryRequest(BaseModel):
-    query: str
+    query: str = Field(..., example="What is Dev Orch?")
     top_k: int = 3
 
 class AdminExecRequest(BaseModel):
-    command: str # The shell command to execute
+    command: str = Field(..., example="ls -l") # The shell command to execute
 
 class AdminExecResponse(BaseModel):
     stdout: str
@@ -110,7 +113,7 @@ class AdminExecResponse(BaseModel):
 # Global State (In-memory stores)
 # -----------------------------------------------------------------
 # This dict will hold our loaded model instances ("agents")
-# e.g., {"TheCouncil_Gemma1b": <Llama object>}
+# e.g., {"council": <Llama object>}
 loaded_models = {}
 
 # -----------------------------------------------------------------
@@ -159,10 +162,11 @@ async def load_model(request: LoadModelRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/v1/models/unload", tags=["Model Management"])
-async def unload_model(model_name: str):
+async def unload_model(request: UnloadModelRequest):
     """
     Unload a model from VRAM to free up resources.
     """
+    model_name = request.model_name
     if model_name not in loaded_models:
         log.warning(f"Unload request for '{model_name}', but it's not loaded.")
         raise HTTPException(status_code=404, detail=f"Model '{model_name}' not found.")
