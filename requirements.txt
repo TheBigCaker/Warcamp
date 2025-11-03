@@ -10,3 +10,4 @@ sentence-transformers
 requests
 reportlab
 aiohttp
+websockets

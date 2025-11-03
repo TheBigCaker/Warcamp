@@ -1,5 +1,5 @@
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, BackgroundTasks
 from fastapi.responses import StreamingResponse, HTMLResponse, FileResponse
 from pydantic import BaseModel, Field
 import subprocess
@@ -13,6 +13,8 @@ from llama_cpp import Llama
 from dotenv import load_dotenv
 import datetime
 import aiohttp
+import asyncio
+import uuid
 
 # --- RAG Imports ---
 import numpy as np
@@ -54,8 +56,10 @@ if not MODELS_ROOT:
 
 # Read the Port from the environment variable, default to 8001
 APP_PORT = int(os.environ.get("WARCAMP_PORT", 8001))
+BASE_URL = f"http://127.0.0.1:{APP_PORT}"
 
 log.info(f"Warcamp 🏕️ initializing... Model Root: {MODELS_ROOT}")
+log.info(f"Warcamp 🏕️ API will be available at {BASE_URL}")
 
 # --- Dynamic Enum Creation for Swagger UI ---
 def _get_model_file_enum() -> Enum:
@@ -114,7 +118,7 @@ except Exception as e:
 app = FastAPI(
     title="Warcamp 🏕️ - Dev Orch Backend",
     description="API for orchestrating local LLM agents (Gemma, CodeGemma) via llama-cpp-python.",
-    version="0.1.0"
+    version="0.2.0" # <-- Version Bump
 )
 
 # -----------------------------------------------------------------
@@ -161,12 +165,33 @@ class AdminExecResponse(BaseModel):
     stderr: str
     return_code: int
 
+# --- NEW: Orchestration Models ---
+class MissionRequest(BaseModel):
+    prompt: str = Field(..., json_schema_extra={'example': 'Build me a python script that acts as a simple calculator.'})
+    council_model: str = Field("council", json_schema_extra={'example': 'council'})
+    advisor_model: str = Field("advisor", json_schema_extra={'example': 'advisor'})
+    advisor_filename: ModelFileEnum
+    sarge_model: str = Field("sarge", json_schema_extra={'example': 'sarge'})
+    sarge_filename: ModelFileEnum
+
+class MissionStatus(BaseModel):
+    mission_id: str
+    status: str
+    details: List[str]
+# --- End Orchestration Models ---
+
 # -----------------------------------------------------------------
 # Global State (In-memory stores)
 # -----------------------------------------------------------------
 # This dict will hold our loaded model instances ("agents")
 # e.g., {"council": <Llama object>}
-loaded_models = {}
+loaded_models: Dict[str, Llama] = {}
+
+# --- NEW: Mission Tracking ---
+# This will store the status of long-running missions
+# e.g., {"mission-uuid-123": ["Step 1: Loading Advisor..."]}
+mission_logs: Dict[str, List[str]] = {}
+# --- End Mission Tracking ---
 
 # -----------------------------------------------------------------
 # API Endpoints
@@ -434,7 +459,7 @@ async def generate_completion(request: GenerateRequest):
             output = model.create_completion(
                 prompt=request.prompt,
                 max_tokens=request.max_tokens,
-                temperature=request.temperature,
+                temperature=temperature,
                 stream=False
             )
             log.info(f"Non-streaming generation for '{request.model_name}' complete.")
@@ -563,7 +588,187 @@ async def admin_exec(request: AdminExecRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 # -----------------------------------------------------------------
-# --- NEW: Smoke Test & Report Generation ---
+# --- NEW: Live Chat WebSocket (V3.7) ---
+# -----------------------------------------------------------------
+@app.websocket("/ws/council-chat")
+async def websocket_council_chat(websocket: WebSocket):
+    """
+    Handles a live, streaming chat session with the 'council' model.
+    """
+    await websocket.accept()
+    log.info("WebSocket connection established for Council chat.")
+    
+    # Check if 'council' model is loaded
+    if "council" not in loaded_models:
+        log.warning("Council chat requested, but 'council' model is not loaded.")
+        await websocket.send_json({"error": "The 'council' model is not loaded."})
+        await websocket.close()
+        return
+
+    model = loaded_models["council"]
+
+    try:
+        while True:
+            data = await websocket.receive_json()
+            prompt = data.get("prompt")
+            if not prompt:
+                await websocket.send_json({"error": "No 'prompt' field in message."})
+                continue
+            
+            log.info(f"WebSocket received prompt: {prompt[:50]}...")
+            
+            # Start the streaming completion
+            stream = model.create_completion(
+                prompt=prompt,
+                max_tokens=1024, # Larger context for chat
+                temperature=0.7,
+                stream=True
+            )
+            
+            # Send each token back over the WebSocket
+            full_response = ""
+            for output in stream:
+                chunk = output.get('choices', [{}])[0].get('text', '')
+                if chunk:
+                    full_response += chunk
+                    await websocket.send_json({"token": chunk})
+            
+            log.info(f"WebSocket full response generated: {full_response[:50]}...")
+            await websocket.send_json({"status": "done"})
+
+    except WebSocketDisconnect:
+        log.info("WebSocket connection closed.")
+    except Exception as e:
+        log.error(f"Error in WebSocket chat: {e}")
+        await websocket.send_json({"error": str(e)})
+        await websocket.close()
+
+
+# -----------------------------------------------------------------
+# --- NEW: Agent Orchestration (V3.7) ---
+# -----------------------------------------------------------------
+
+async def _log_mission(mission_id: str, message: str):
+    """Helper to log mission progress."""
+    log.info(f"[Mission {mission_id[:6]}] {message}")
+    if mission_id not in mission_logs:
+        mission_logs[mission_id] = []
+    mission_logs[mission_id].append(message)
+
+async def _run_mission_logic(mission_id: str, chief_prompt: str, req: MissionRequest):
+    """
+    The background task that runs the full agent workflow.
+    """
+    await _log_mission(mission_id, f"Mission Started: {chief_prompt[:50]}...")
+    
+    advisor_name = req.advisor_model
+    advisor_file = req.advisor_filename.value
+    sarge_name = req.sarge_model
+    sarge_file = req.sarge_filename.value
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            
+            # === STEP 1: Load Advisor ===
+            await _log_mission(mission_id, f"Loading Advisor model '{advisor_name}'...")
+            load_payload = {"model_name": advisor_name, "model_filename": advisor_file, "n_gpu_layers": -1, "n_ctx": 4096}
+            async with session.post(f"{BASE_URL}/api/v1/models/load", json=load_payload) as r:
+                if not r.ok:
+                    raise Exception(f"Failed to load Advisor: {await r.text()}")
+            
+            # === STEP 2: Generate Plan ===
+            await _log_mission(mission_id, "Advisor loaded. Generating plan...")
+            plan_prompt = f"USER: You are the Advisor. The Chief's request is: '{chief_prompt}'. Create a detailed plan, including file structure and logic, as Plans.md.\nASSISTANT:\n`markdown\n# Plans.md\n"
+            gen_payload = {"model_name": advisor_name, "prompt": plan_prompt, "max_tokens": 2048, "stream": False}
+            async with session.post(f"{BASE_URL}/api/v1/generate", json=gen_payload) as r:
+                if not r.ok:
+                    raise Exception(f"Advisor failed to generate plan: {await r.text()}")
+                plan_data = await r.json()
+                plan_text = plan_data['choices'][0]['text']
+            
+            await _log_mission(mission_id, "Plan generated by Advisor.")
+            # TODO: Save plan_text to disk as 'Plans.md'
+
+            # === STEP 3: Unload Advisor ===
+            await _log_mission(mission_id, f"Unloading Advisor '{advisor_name}'...")
+            unload_payload = {"model_name": advisor_name}
+            async with session.post(f"{BASE_URL}/api/v1/models/unload", json=unload_payload) as r:
+                if not r.ok:
+                    raise Exception(f"Failed to unload Advisor: {await r.text()}")
+
+            # === STEP 4: Load Sarge ===
+            await _log_mission(mission_id, f"Loading Sarge model '{sarge_name}'...")
+            load_payload = {"model_name": sarge_name, "model_filename": sarge_file, "n_gpu_layers": -1, "n_ctx": 4096}
+            async with session.post(f"{BASE_URL}/api/v1/models/load", json=load_payload) as r:
+                if not r.ok:
+                    raise Exception(f"Failed to load Sarge: {await r.text()}")
+
+            # === STEP 5: Generate Tasks ===
+            await _log_mission(mission_id, "Sarge loaded. Generating tasks from plan...")
+            task_prompt = f"USER: You are Sarge. Read this plan:\n{plan_text}\n\nCreate a detailed, step-by-step Tasklist.md for the Orchs.\nASSISTANT:\n`markdown\n# Tasklist.md\n"
+            gen_payload = {"model_name": sarge_name, "prompt": task_prompt, "max_tokens": 2048, "stream": False}
+            async with session.post(f"{BASE_URL}/api/v1/generate", json=gen_payload) as r:
+                if not r.ok:
+                    raise Exception(f"Sarge failed to generate tasks: {await r.text()}")
+                task_data = await r.json()
+                task_text = task_data['choices'][0]['text']
+
+            await _log_mission(mission_id, "Tasklist generated by Sarge.")
+            # TODO: Save task_text to disk as 'Tasklist.md'
+            
+            # === STEP 6: Unload Sarge ===
+            await _log_mission(mission_id, f"Unloading Sarge '{sarge_name}'...")
+            unload_payload = {"model_name": sarge_name}
+            async with session.post(f"{BASE_URL}/api/v1/models/unload", json=unload_payload) as r:
+                if not r.ok:
+                    raise Exception(f"Failed to unload Sarge: {await r.text()}")
+
+            # === TODO: Load Orchs and execute tasks ===
+            await _log_mission(mission_id, "TODO: Load Orchs and execute task list.")
+
+            await _log_mission(mission_id, "Mission Complete!")
+
+    except Exception as e:
+        await _log_mission(mission_id, f"MISSION FAILED: {str(e)}")
+
+
+@app.post("/api/v1/run-mission", tags=["Orchestration"], response_model=MissionStatus)
+async def run_mission(request: MissionRequest, background_tasks: BackgroundTasks):
+    """
+    Starts a new agent orchestration mission in the background.
+    """
+    mission_id = f"mission_{uuid.uuid4()}"
+    log.info(f"Received new mission, assigning ID: {mission_id}")
+    
+    # Start the agent workflow as a background task
+    background_tasks.add_task(_run_mission_logic, mission_id, request.prompt, request)
+    
+    # Return immediately
+    return MissionStatus(
+        mission_id=mission_id,
+        status="Mission Started",
+        details=[f"Mission '{mission_id}' has been queued. Check status endpoint for progress."]
+    )
+
+@app.get("/api/v1/mission-status/{mission_id}", tags=["Orchestration"], response_model=MissionStatus)
+async def get_mission_status(mission_id: str):
+    """
+    Checks the status and logs of a running mission.
+    """
+    if mission_id not in mission_logs:
+        raise HTTPException(status_code=404, detail="Mission ID not found.")
+        
+    logs = mission_logs[mission_id]
+    current_status = logs[-1] if logs else "Unknown"
+    
+    return MissionStatus(
+        mission_id=mission_id,
+        status=current_status,
+        details=logs
+    )
+
+# -----------------------------------------------------------------
+# --- Smoke Test & Report Generation ---
 # -----------------------------------------------------------------
 
 # --- Test Logic ---
@@ -680,7 +885,7 @@ async def run_smoke_test_logic(base_url: str, model_filename: str) -> List[Dict[
         # Step 8: Unload Model
         try:
             payload = {"model_name": MODEL_NAME}
-            async with session.post(f"{base_url}/api/v1/models/unload", json=payload) as r:
+            async with session.post(f"{base_URL}/api/v1/models/unload", json=payload) as r:
                 r.raise_for_status()
                 data = await r.json()
                 assert "unloaded successfully" in data.get("message", "")
