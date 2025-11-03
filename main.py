@@ -12,6 +12,10 @@ from enum import Enum
 from llama_cpp import Llama
 from dotenv import load_dotenv
 
+# --- RAG Imports ---
+import numpy as np
+import faiss
+
 # -----------------------------------------------------------------
 # Environment & Logging Setup
 # -----------------------------------------------------------------
@@ -72,6 +76,50 @@ ModelFileEnum = _get_model_file_enum()
 # --- End Dynamic Enum Creation ---
 
 
+# --- RAG System Initialization ---
+# This system is now based on a GGUF embedding model
+embedding_model_instance = None
+faiss_index = None
+document_store = []
+EMBEDDING_DIM = 256 # Specific to embeddinggemma-300M
+
+try:
+    EMBEDDING_MODEL_FILENAME = os.environ.get("WARCAMP_EMBEDDING_MODEL_FILENAME")
+    if not EMBEDDING_MODEL_FILENAME:
+        log.error("FATAL ERROR: WARCAMP_EMBEDDING_MODEL_FILENAME not set in .env")
+        raise ValueError("Embedding model filename not specified.")
+        
+    embedding_model_path = os.path.join(MODELS_ROOT, EMBEDDING_MODEL_FILENAME)
+    if not os.path.exists(embedding_model_path):
+        log.error(f"FATAL ERROR: Embedding model file not found at: {embedding_model_path}")
+        raise FileNotFoundError(f"Missing embedding model: {EMBEDDING_MODEL_FILENAME}")
+
+    log.info(f"Loading RAG embedding model from: {embedding_model_path}...")
+    
+    # Load the GGUF model in embedding mode
+    embedding_model_instance = Llama(
+        model_path=embedding_model_path,
+        embedding=True,
+        n_ctx=512, # Context for embeddings can be smaller
+        n_gpu_layers=-1, # Offload embedding model fully to GPU
+        verbose=True
+    )
+    
+    log.info(f"Embedding model '{EMBEDDING_MODEL_FILENAME}' loaded successfully.")
+
+    # Create a FAISS index (Flat, L2 distance)
+    # This index lives in RAM
+    faiss_index = faiss.IndexFlatL2(EMBEDDING_DIM)
+    
+    # In-memory store for the actual text content (the "documents")
+    log.info(f"In-memory FAISS index (IndexFlatL2, Dim={EMBEDDING_DIM}) initialized.")
+
+except Exception as e:
+    log.error(f"FATAL ERROR: Could not initialize RAG system: {e}")
+    sys.exit(1)
+# --- End RAG Initialization ---
+
+
 app = FastAPI(
     title="Warcamp 🏕️ - Dev Orch Backend",
     description="API for orchestrating local LLM agents (Gemma, CodeGemma) via llama-cpp-python.",
@@ -96,6 +144,10 @@ class GenerateRequest(BaseModel):
     max_tokens: int = 512
     temperature: float = 0.7
     stream: bool = True # Controls whether to stream the response
+
+class MemoryAddRequest(BaseModel):
+    text: str = Field(..., example="Dev Orch is an AI-driven system to write software.")
+    doc_id: str = Field(..., example="doc_id_001") # A unique ID for this text chunk
 
 class MemoryQueryRequest(BaseModel):
     query: str = Field(..., example="What is Dev Orch?")
@@ -143,6 +195,11 @@ async def load_model(request: LoadModelRequest):
     if not os.path.exists(model_path):
         log.error(f"Model file not found at path: {model_path}")
         raise HTTPException(status_code=404, detail=f"Model file not found: {model_filename_str}")
+    
+    # Check that we are not trying to load the embedding model as a chat model
+    if model_filename_str == EMBEDDING_MODEL_FILENAME:
+        log.warning(f"Preventing load: '{model_filename_str}' is the active embedding model.")
+        raise HTTPException(status_code=400, detail="Cannot load the active embedding model as a chat model.")
 
     log.info(f"Loading model '{request.model_name}' from '{model_path}'...")
     log.info(f"  n_gpu_layers: {request.n_gpu_layers}, n_ctx: {request.n_ctx}")
@@ -153,6 +210,7 @@ async def load_model(request: LoadModelRequest):
             n_gpu_layers=request.n_gpu_layers,
             n_ctx=request.n_ctx,
             verbose=True
+            # Note: embedding=False is the default
         )
         loaded_models[request.model_name] = model
         log.info(f"SUCCESS: Model '{request.model_name}' is loaded and online.")
@@ -176,7 +234,6 @@ async def unload_model(request: UnloadModelRequest):
         # Get the model, delete it, and force garbage collection
         model_instance = loaded_models.pop(model_name)
         del model_instance
-        # TODO: Add torch.cuda.empty_cache() if using GPU tensors explicitly
         
         log.info(f"SUCCESS: Model '{model_name}' unloaded and VRAM freed.")
         return {"message": f"Model '{model_name}' unloaded successfully."}
@@ -269,12 +326,63 @@ async def generate_completion(request: GenerateRequest):
 
 # --- RAG/Memory ---
 
+@app.post("/api/v1/memory/add", tags=["RAG / Memory"])
+async def add_to_memory(request: MemoryAddRequest):
+    """
+    Add a chunk of text to the in-memory vector store.
+    """
+    try:
+        log.info(f"Adding to memory, doc_id: {request.doc_id}")
+        
+        # 1. Create embedding for the text using our GGUF model
+        vector_list = embedding_model_instance.embed(request.text)
+        
+        # 2. Convert to NumPy array, ensure float32, and reshape for FAISS
+        vector_np = np.array(vector_list).astype('float32').reshape(1, -1)
+        
+        if vector_np.shape[1] != EMBEDDING_DIM:
+            log.error(f"Embedding dimension mismatch! Model returned {vector_np.shape[1]} but index requires {EMBEDDING_DIM}.")
+            raise ValueError("Embedding dimension mismatch.")
+            
+        # 3. Add vector to FAISS index
+        faiss_index.add(vector_np)
+        
+        # 4. Store the text content, keyed by the new index ID
+        new_index_id = faiss_index.ntotal - 1
+        document_store.append({
+            "id": request.doc_id,
+            "text": request.text
+        })
+        
+        # Sanity check
+        if new_index_id != (len(document_store) - 1):
+            log.warning("FAISS index and document store are out of sync!")
+            
+        log.info(f"Successfully added doc_id '{request.doc_id}' to vector store. Total documents: {faiss_index.ntotal}")
+        return {
+            "message": "Text added to memory successfully.",
+            "new_index_id": new_index_id,
+            "doc_id": request.doc_id,
+            "total_documents": faiss_index.ntotal
+        }
+    except Exception as e:
+        log.error(f"Failed to add text to memory. Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/v1/memory/query", tags=["RAG / Memory"])
 async def query_memory(request: MemoryQueryRequest):
     """
     Query the RAG vector store with a string.
     """
-    # TODO: Add EmbeddingGemma/Vector DB logic
+    # TODO: Implement the query logic:
+    # 1. Create embedding for request.query using embedding_model_instance.embed()
+    # 2. Convert to NumPy array and reshape
+    # 3. Use faiss_index.search(embedding, k=request.top_k)
+    # 4. Get the indices (I) and distances (D) from the result
+    # 5. Loop through the indices (I[0])
+    # 6. Use each index i to look up the original text in document_store[i]
+    # 7. Return the found texts
     return {"message": "TODO: Query vector store", "query": request.query}
 
 # --- Admin Shell ---

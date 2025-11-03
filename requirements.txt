@@ -3,4 +3,4 @@ uvicorn[standard]
 llama-cpp-python
 pydantic
 python-dotenv
-# TODO: Add vector DB (e.g., faiss-cpu)
+faiss-cpu
