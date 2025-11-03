@@ -8,6 +8,7 @@ import sys
 import logging
 import json
 from typing import Iterator
+from enum import Enum
 from llama_cpp import Llama
 from dotenv import load_dotenv
 
@@ -44,6 +45,33 @@ APP_PORT = int(os.environ.get("WARCAMP_PORT", 8001))
 
 log.info(f"Warcamp 🏕️ initializing... Model Root: {MODELS_ROOT}")
 
+# --- Dynamic Enum Creation for Swagger UI ---
+def _get_model_file_enum() -> Enum:
+    """
+    Scans the MODELS_ROOT directory and creates a dynamic Enum of .gguf files
+    for use in the Swagger UI drop-down.
+    """
+    if not os.path.exists(MODELS_ROOT):
+        log.warning(f"Model directory not found: {MODELS_ROOT}. Creating placeholder enum.")
+        return Enum("ModelFileEnum", {"NO_MODELS_FOUND": "NO_MODELS_FOUND"})
+    
+    try:
+        model_files = [f for f in os.listdir(MODELS_ROOT) if f.endswith(".gguf")]
+        if not model_files:
+            log.warning(f"No .gguf models found in {MODELS_ROOT}. Creating placeholder enum.")
+            return Enum("ModelFileEnum", {"NO_MODELS_FOUND": "NO_MODELS_FOUND"})
+            
+        # Create an Enum where the name and value are both the filename
+        # e.g., "gemma-1b.gguf" = "gemma-1b.gguf"
+        return Enum("ModelFileEnum", {f: f for f in model_files})
+    except Exception as e:
+        log.error(f"Error scanning model directory '{MODELS_ROOT}': {e}")
+        return Enum("ModelFileEnum", {"ERROR_SCANNING_MODELS": "ERROR_SCANNING_MODELS"})
+
+ModelFileEnum = _get_model_file_enum()
+# --- End Dynamic Enum Creation ---
+
+
 app = FastAPI(
     title="Warcamp 🏕️ - Dev Orch Backend",
     description="API for orchestrating local LLM agents (Gemma, CodeGemma) via llama-cpp-python.",
@@ -54,13 +82,13 @@ app = FastAPI(
 # Pydantic Models (Request/Response Bodies)
 # -----------------------------------------------------------------
 class LoadModelRequest(BaseModel):
-    model_name: str # e.g., "TheCouncil_Gemma1b"
-    model_filename: str # e.g., "gemma-2b-it.gguf". Must be inside MODELS_ROOT
+    model_name: str # e.g., "TheCouncil_Gemma1b" (This is the name you assign)
+    model_filename: ModelFileEnum # <-- This will now be a drop-down in /docs
     n_gpu_layers: int = -1 # -1 = all layers, 0 = no layers
     n_ctx: int = 4096
 
 class GenerateRequest(BaseModel):
-    model_name: str
+    model_name: str # This must match a name you've already loaded
     prompt: str
     max_tokens: int = 512
     temperature: float = 0.7
@@ -105,11 +133,13 @@ async def load_model(request: LoadModelRequest):
         log.warning(f"Load request for '{request.model_name}', which is already loaded.")
         return {"message": f"Model '{request.model_name}' is already loaded."}
 
-    model_path = os.path.join(MODELS_ROOT, request.model_filename)
+    # Convert Enum member to its string value (the filename)
+    model_filename_str = request.model_filename.value
+    model_path = os.path.join(MODELS_ROOT, model_filename_str)
     
     if not os.path.exists(model_path):
         log.error(f"Model file not found at path: {model_path}")
-        raise HTTPException(status_code=404, detail=f"Model file not found: {request.model_filename}")
+        raise HTTPException(status_code=404, detail=f"Model file not found: {model_filename_str}")
 
     log.info(f"Loading model '{request.model_name}' from '{model_path}'...")
     log.info(f"  n_gpu_layers: {request.n_gpu_layers}, n_ctx: {request.n_ctx}")
