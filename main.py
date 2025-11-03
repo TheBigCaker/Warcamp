@@ -826,7 +826,8 @@ async def run_smoke_test_logic(base_url: str, model_filename: str) -> List[Dict[
         # Step 4: Add to Memory
         try:
             payload = {"text": "The secret code is 'work work'.", "doc_id": "smoke_test_doc"}
-            async with session.post(f"{base_url}/api/v1/memory/add", json=payload).as_view() r:
+            # --- BUG FIX V4.3: Removed stray '.as_view()' ---
+            async with session.post(f"{base_url}/api/v1/memory/add", json=payload) as r:
                 r.raise_for_status()
                 data = await r.json()
                 assert data.get("total_documents", 0) > 0
