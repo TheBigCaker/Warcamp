@@ -662,9 +662,9 @@ async def generate_completion(request: GenerateRequest):
         log.info(f"Starting non-streaming generation for '{request.model_name}'...")
         try:
             output = model.create_completion(
-                prompt=request.prompt,
-                max_tokens=request.max_tokens,
-                temperature=request.temperature,
+                prompt=prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
                 stream=False
             )
             log.info(f"Non-streaming generation for '{request.model_name}' complete.")
@@ -1236,7 +1236,7 @@ async def run_smoke_test_endpoint():
 # --- Main Entry Point ---
 # -----------------------------------------------------------------
 
-# --- V4.7: Add the chat router to the main app ---
+# --- V5.1: Add the chat router to the main app ---
 app.include_router(chat_router)
 
 if __name__ == "__main__":
