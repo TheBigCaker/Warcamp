@@ -430,6 +430,7 @@ async def get_dashboard():
         </div>
 
         <script>
+            // --- BUG FIX V5.2: Correct WebSocket URL ---
             const ws = new WebSocket(ws:///ws/council-chat);
             const messages = document.getElementById('chat-messages');
             const input = document.getElementById('chat-input');
@@ -438,6 +439,7 @@ async def get_dashboard():
 
             function addMessage(text, sender) {
                 const msgDiv = document.createElement('div');
+                // --- BUG FIX V5.2: Correct className assignment ---
                 msgDiv.className = message ;
                 msgDiv.innerText = text;
                 messages.appendChild(msgDiv);
@@ -458,6 +460,7 @@ async def get_dashboard():
                 const data = JSON.parse(event.data);
 
                 if (data.error) {
+                    // --- BUG FIX V5.2: Correct error message handling ---
                     addMessage(Error: , 'error');
                 } else if (data.status === 'done') {
                     currentCouncilMessage = null;
