@@ -16,6 +16,7 @@ import aiohttp
 import asyncio
 import uuid
 import platform
+from contextlib import asynccontextmanager
 
 # --- RAG Imports ---
 import numpy as np
@@ -116,10 +117,82 @@ except Exception as e:
 # --- End RAG Initialization ---
 
 
+# -----------------------------------------------------------------
+# Global State (In-memory stores)
+# -----------------------------------------------------------------
+# This dict will hold our loaded model instances ("agents")
+# e.g., {"council": <Llama object>}
+loaded_models: Dict[str, Llama] = {}
+
+# --- Mission Tracking ---
+# This will store the status of long-running missions
+# e.g., {"mission-uuid-123": ["Step 1: Loading Advisor..."]}
+mission_logs: Dict[str, List[str]] = {}
+# --- End Mission Tracking ---
+
+# -----------------------------------------------------------------
+# --- NEW: Server Lifespan Event (V5.3) ---
+# -----------------------------------------------------------------
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    On server startup, automatically find and load the 'council' model.
+    """
+    log.info("--- Server Startup Event ---")
+    model_name = "council"
+    
+    try:
+        # 1. Intelligently find the council model file
+        all_models = list(ModelFileEnum.__members__.keys())
+        if not all_models:
+            raise Exception("No models found in Enum.")
+
+        # Prioritize a 'gemma' model with '1b' in the name
+        council_file = next((m for m in all_models if "gemma" in m.lower() and ("1b" in m.lower() or "one-b" in m.lower())), None)
+        
+        if council_file is None:
+            log.warning("Could not find 'gemma-1b' model. Falling back to first valid 'gemma' model.")
+            council_file = next((m for m in all_models if "gemma" in m.lower()), None)
+
+        if council_file is None:
+            raise Exception("No valid 'gemma' model found in model directory to act as Council.")
+            
+        log.info(f"Auto-loading 'council' model: {council_file}")
+        
+        # 2. Load the model
+        model_path = os.path.join(MODELS_ROOT, council_file)
+        model = Llama(
+            model_path=model_path,
+            n_gpu_layers=-1, # Load all layers to GPU
+            n_ctx=4096,
+            verbose=True
+        )
+        loaded_models[model_name] = model
+        log.info(f"--- SUCCESS: 'council' model is loaded and online. ---")
+        
+    except Exception as e:
+        log.error(f"--- FATAL ERROR: Could not auto-load 'council' model: {e} ---")
+        log.error("--- The /ws/council-chat WebSocket will NOT work. ---")
+        log.error("--- Please load 'council' manually via the API. ---")
+    
+    # --- This is where the application runs ---
+    yield
+    # --- End of application run ---
+    
+    # --- Shutdown logic (if any) ---
+    log.info("--- Server Shutdown Event ---")
+    loaded_models.clear()
+    log.info("All models unloaded.")
+
+
+# -----------------------------------------------------------------
+# --- Main FastAPI App ---
+# -----------------------------------------------------------------
 app = FastAPI(
     title="Warcamp 🏕️ - Dev Orch Backend",
     description="API for orchestrating local LLM agents (Gemma, CodeGemma) via llama-cpp-python.",
-    version="0.4.0" # <-- Version Bump
+    version="0.5.0", # <-- Version Bump
+    lifespan=lifespan # <-- Use new lifespan event
 )
 
 # -----------------------------------------------------------------
@@ -182,64 +255,6 @@ class MissionStatus(BaseModel):
 # --- End Orchestration Models ---
 
 # -----------------------------------------------------------------
-# Global State (In-memory stores)
-# -----------------------------------------------------------------
-# This dict will hold our loaded model instances ("agents")
-# e.g., {"council": <Llama object>}
-loaded_models: Dict[str, Llama] = {}
-
-# --- Mission Tracking ---
-# This will store the status of long-running missions
-# e.g., {"mission-uuid-123": ["Step 1: Loading Advisor..."]}
-mission_logs: Dict[str, List[str]] = {}
-# --- End Mission Tracking ---
-
-# -----------------------------------------------------------------
-# --- NEW: Server Startup Event (V5.0) ---
-# -----------------------------------------------------------------
-@app.on_event("startup")
-async def startup_event():
-    """
-    On server startup, automatically find and load the 'council' model.
-    """
-    log.info("--- Server Startup Event ---")
-    model_name = "council"
-    
-    try:
-        # 1. Intelligently find the council model file
-        all_models = list(ModelFileEnum.__members__.keys())
-        if not all_models:
-            raise Exception("No models found in Enum.")
-
-        # Prioritize a 'gemma' model with '1b' in the name
-        council_file = next((m for m in all_models if "gemma" in m.lower() and ("1b" in m.lower() or "one-b" in m.lower())), None)
-        
-        if council_file is None:
-            log.warning("Could not find 'gemma-1b' model. Falling back to first valid 'gemma' model.")
-            council_file = next((m for m in all_models if "gemma" in m.lower()), None)
-
-        if council_file is None:
-            raise Exception("No valid 'gemma' model found in model directory to act as Council.")
-            
-        log.info(f"Auto-loading 'council' model: {council_file}")
-        
-        # 2. Load the model
-        model_path = os.path.join(MODELS_ROOT, council_file)
-        model = Llama(
-            model_path=model_path,
-            n_gpu_layers=-1, # Load all layers to GPU
-            n_ctx=4096,
-            verbose=True
-        )
-        loaded_models[model_name] = model
-        log.info(f"--- SUCCESS: 'council' model is loaded and online. ---")
-        
-    except Exception as e:
-        log.error(f"--- FATAL ERROR: Could not auto-load 'council' model: {e} ---")
-        log.error("--- The /ws/council-chat WebSocket will NOT work. ---")
-        log.error("--- Please load 'council' manually via the API. ---")
-
-# -----------------------------------------------------------------
 # API Endpoints
 # -----------------------------------------------------------------
 
@@ -248,7 +263,7 @@ async def get_dashboard():
     """
     Serves the main HTML dashboard for the Warcamp.
     """
-    # --- V4.9 GUI OVERHAUL: RAINBOW SPRINKLE DONUT THEME ---
+    # --- V5.3 GUI Update: Cream/Tan Background ---
     html_content = """
     <!DOCTYPE html>
     <html lang="en">
@@ -265,7 +280,7 @@ async def get_dashboard():
                 --sprinkle-green: #2ecc71;
                 --sprinkle-red: #e74c3c;
                 --text-color: #333;
-                --bg-color: #fdf2f5; /* Light pink background */
+                --bg-color: #FDFBF5; /* <-- NEW: Cream/Tan Background */
                 --border-color: #E0E0E0;
             }
             body {
@@ -1247,5 +1262,6 @@ if __name__ == "__main__":
     For production, you would use:
     'uvicorn main:app --host 0.0.0.0 --port 8000 --reload'
     """
-    log.info(f"Starting Uvicorn server in debug mode (reload=True) on port {APP_PORT}...")
-    uvicorn.run("main:app", host="127.0.0.1", port=APP_PORT, reload=True)
+    log.info(f"Starting Uvicorn server in debug mode (reload=False) on port {APP_PORT}...")
+    # --- BUG FIX V5.2: Set reload=False to prevent restart loops ---
+    uvicorn.run("main:app", host="127.0.0.1", port=APP_PORT, reload=False)
