@@ -195,6 +195,51 @@ mission_logs: Dict[str, List[str]] = {}
 # --- End Mission Tracking ---
 
 # -----------------------------------------------------------------
+# --- NEW: Server Startup Event (V5.0) ---
+# -----------------------------------------------------------------
+@app.on_event("startup")
+async def startup_event():
+    """
+    On server startup, automatically find and load the 'council' model.
+    """
+    log.info("--- Server Startup Event ---")
+    model_name = "council"
+    
+    try:
+        # 1. Intelligently find the council model file
+        all_models = list(ModelFileEnum.__members__.keys())
+        if not all_models:
+            raise Exception("No models found in Enum.")
+
+        # Prioritize a 'gemma' model with '1b' in the name
+        council_file = next((m for m in all_models if "gemma" in m.lower() and ("1b" in m.lower() or "one-b" in m.lower())), None)
+        
+        if council_file is None:
+            log.warning("Could not find 'gemma-1b' model. Falling back to first valid 'gemma' model.")
+            council_file = next((m for m in all_models if "gemma" in m.lower()), None)
+
+        if council_file is None:
+            raise Exception("No valid 'gemma' model found in model directory to act as Council.")
+            
+        log.info(f"Auto-loading 'council' model: {council_file}")
+        
+        # 2. Load the model
+        model_path = os.path.join(MODELS_ROOT, council_file)
+        model = Llama(
+            model_path=model_path,
+            n_gpu_layers=-1, # Load all layers to GPU
+            n_ctx=4096,
+            verbose=True
+        )
+        loaded_models[model_name] = model
+        log.info(f"--- SUCCESS: 'council' model is loaded and online. ---")
+        
+    except Exception as e:
+        log.error(f"--- FATAL ERROR: Could not auto-load 'council' model: {e} ---")
+        log.error("--- The /ws/council-chat WebSocket will NOT work. ---")
+        log.error("--- Please load 'council' manually via the API. ---")
+
+# -----------------------------------------------------------------
 # API Endpoints
 # -----------------------------------------------------------------
 
