@@ -662,9 +662,9 @@ async def generate_completion(request: GenerateRequest):
         log.info(f"Starting non-streaming generation for '{request.model_name}'...")
         try:
             output = model.create_completion(
-                prompt=prompt,
-                max_tokens=max_tokens,
-                temperature=temperature,
+                prompt=request.prompt,
+                max_tokens=request.max_tokens,
+                temperature=request.temperature,
                 stream=False
             )
             log.info(f"Non-streaming generation for '{request.model_name}' complete.")
